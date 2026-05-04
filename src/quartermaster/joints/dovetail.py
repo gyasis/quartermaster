@@ -44,10 +44,12 @@ def dovetail_path_2d(
     """Cut path between LEFT and RIGHT halves in (n', s') seam-along coords.
 
     LEFT half is at n' < path; RIGHT at n' > path. The path runs from
-    -seam/2 to +seam/2 in s' and stays at n' = 0 except where the tail
+    -seam/2 to +seam/2 in s' and stays at n' = 0 except where each tail
     protrudes (n' = +protrusion_mm).
 
-    Returns 6 points for tail_count=1; multi-tail paths are not yet supported.
+    For N tails: returns 4N+2 points. Tails are distributed evenly along the
+    seam with N+1 equal gaps (one before the first tail, one between each
+    pair, one after the last). Each tail flares outward by `angle_deg`.
     """
     if spec.joint != JointType.DOVETAIL:
         raise ValueError(f"dovetail_path_2d requires a DOVETAIL spec, got {spec.joint}")
@@ -55,28 +57,31 @@ def dovetail_path_2d(
         raise ValueError(f"seam_length must be > 0, got {seam_length}")
 
     tail_count = spec.params.get("tail_count", 1)
-    if tail_count != 1:
-        raise NotImplementedError(f"only tail_count=1 supported (got {tail_count})")
+    if tail_count < 1:
+        raise ValueError(f"tail_count must be >= 1, got {tail_count}")
 
     protrusion, base_width, angle_rad = _resolve_geometry(spec, thickness)
     flare      = protrusion * math.tan(angle_rad)
     top_width  = base_width + 2 * flare
+    half_seam  = seam_length / 2
+    half_base  = base_width  / 2
+    half_top   = top_width   / 2
 
-    if base_width >= seam_length:
+    gap = (seam_length - tail_count * base_width) / (tail_count + 1)
+    if gap <= 0:
         raise ValueError(
-            f"dovetail base_width ({base_width}) >= seam ({seam_length}); "
-            f"tail won't fit on this seam"
+            f"{tail_count} tails of base_width={base_width} won't fit on seam={seam_length} "
+            f"(gap would be {gap:.2f})"
         )
 
-    half_seam = seam_length / 2
-    half_base = base_width  / 2
-    half_top  = top_width   / 2
-
-    return [
-        (0.0,         -half_seam),  # bottom of seam, on cut line
-        (0.0,         -half_base),  # start of dovetail base (LEFT side of tail)
-        (+protrusion, -half_top ),  # outer corner, lower side of tail
-        (+protrusion, +half_top ),  # outer corner, upper side
-        (0.0,         +half_base),  # end of dovetail base
-        (0.0,         +half_seam),  # top of seam, on cut line
-    ]
+    points: list[tuple[float, float]] = [(0.0, -half_seam)]
+    for i in range(tail_count):
+        center = -half_seam + (i + 1) * gap + (i + 0.5) * base_width
+        points.extend([
+            (0.0,         center - half_base),  # base near-side
+            (+protrusion, center - half_top ),  # outer near-side (flared OUT past base)
+            (+protrusion, center + half_top ),  # outer far-side
+            (0.0,         center + half_base),  # base far-side
+        ])
+    points.append((0.0, +half_seam))
+    return points

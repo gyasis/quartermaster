@@ -95,14 +95,50 @@ class TestDovetailPath:
         with pytest.raises(ValueError):
             dovetail_path_2d(_spec(angle=0), thickness=6.0, seam_length=80.0)
 
-    def test_multi_tail_not_yet_supported(self):
-        with pytest.raises(NotImplementedError):
-            dovetail_path_2d(_spec(tail_count=3), thickness=6.0, seam_length=200.0)
+    def test_zero_tails_rejected(self):
+        with pytest.raises(ValueError):
+            dovetail_path_2d(_spec(tail_count=0), thickness=6.0, seam_length=80.0)
 
     def test_rejects_non_dovetail_spec(self):
         spec = JointSpec(JointType.SCARF, {"ratio": 8, "overlap_mm": 32}, 0)
         with pytest.raises(ValueError):
             dovetail_path_2d(spec, thickness=6.0, seam_length=80.0)
+
+
+class TestMultiTail:
+    """tail_count > 1 distributes N tails evenly along the seam."""
+
+    def test_two_tails_returns_ten_points(self):
+        path = dovetail_path_2d(_spec(tail_count=2), thickness=4.0, seam_length=200.0)
+        assert len(path) == 10  # 4N + 2
+
+    def test_three_tails_returns_fourteen_points(self):
+        path = dovetail_path_2d(_spec(tail_count=3), thickness=4.0, seam_length=300.0)
+        assert len(path) == 14
+
+    def test_tails_centered_symmetrically(self):
+        """For even N, tail centers are symmetric around s'=0."""
+        path = dovetail_path_2d(_spec(tail_count=2), thickness=4.0, seam_length=200.0)
+        # Tail 0 base spans path[1]..path[4]; center is midway
+        center_0 = (path[1][1] + path[4][1]) / 2
+        center_1 = (path[5][1] + path[8][1]) / 2
+        assert center_0 == pytest.approx(-center_1)
+
+    def test_gaps_evenly_distributed(self):
+        """With N tails, the (N+1) gaps should all be equal."""
+        path = dovetail_path_2d(_spec(tail_count=2), thickness=4.0, seam_length=200.0)
+        # Gaps in s': start to first base, between bases, last base to end
+        gap_start = path[1][1] - path[0][1]      # -100 to first base near-side
+        gap_mid   = path[5][1] - path[4][1]      # tail 1 base far-side to tail 2 base near-side
+        gap_end   = path[9][1] - path[8][1]      # tail 2 base far-side to +100
+        assert gap_start == pytest.approx(gap_mid)
+        assert gap_start == pytest.approx(gap_end)
+
+    def test_too_many_tails_rejected(self):
+        # 20 tails of base_width=16 (default for 4mm thickness) need 320mm; only 200 available
+        spec = _spec(tail_count=20)
+        with pytest.raises(ValueError, match="won't fit"):
+            dovetail_path_2d(spec, thickness=4.0, seam_length=200.0)
 
 
 class TestIntegrationWithPicker:

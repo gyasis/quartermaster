@@ -17,7 +17,12 @@ class CutResult:
     seam_length: float
 
 
-def cut_along_plane(target_obj, plane_empty, lockable: bool = False) -> CutResult:
+def cut_along_plane(
+    target_obj,
+    plane_empty,
+    lockable:      bool = False,
+    override_spec: "JointSpec | None" = None,
+) -> CutResult:
     """Bake `target_obj`'s modifier stack and split it into two halves using
     the joint type chosen by `pick_joint`. Idempotent: removes prior
     `<name>_L` / `_R` / `_baked` outputs.
@@ -48,9 +53,12 @@ def cut_along_plane(target_obj, plane_empty, lockable: bool = False) -> CutResul
     bbox_max = (max(xs), max(ys), max(zs))
     thickness, seam_length = base_plane.measure(bbox_min, bbox_max)
 
-    spec = pick_joint(thickness=thickness, seam_length=seam_length)
+    if override_spec is not None:
+        spec = override_spec
+    else:
+        spec = pick_joint(thickness=thickness, seam_length=seam_length)
 
-    if lockable and spec.joint == JointType.SCARF:
+    if override_spec is None and lockable and spec.joint == JointType.SCARF:
         table_mm = max(thickness * 2.0, 6.0)
         spec = JointSpec(
             joint=spec.joint,

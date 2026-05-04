@@ -267,6 +267,58 @@ def test_active_half_redirects_to_source():
     check("QM_TestBlock_L"   in bpy.data.objects,    "fresh QM_TestBlock_L still exists (re-cut from source)")
 
 
+def test_multi_tail_dovetail_via_override():
+    print("\n[9] Multi-tail dovetail (override_spec, tail_count=2)")
+    cleanup()
+    bpy.ops.quartermaster.add_test_block()  # 300x200x4mm — picker would say SCARF
+    bpy.ops.quartermaster.add_cut_plane()
+    empty = bpy.data.objects["QM_CutPlane"]
+    empty.rotation_mode = "XYZ"
+    empty.rotation_euler = (0.0, math.pi / 2, 0.0)
+    bpy.context.view_layer.update()
+
+    # Force a 2-tail dovetail via override_spec (bypasses the picker)
+    from quartermaster import JointSpec, JointType
+    from quartermaster.blender.cut import cut_along_plane
+
+    block = bpy.data.objects["QM_TestBlock"]
+    spec = JointSpec(
+        JointType.DOVETAIL,
+        {"angle_deg": 10, "tail_count": 2},
+        pin_count=0,
+        rationale="smoke: forced multi-tail",
+    )
+    cut_along_plane(block, empty, override_spec=spec)
+
+    check("QM_TestBlock_L" in bpy.data.objects, "left half created")
+    left = bpy.data.objects["QM_TestBlock_L"]
+
+    # 4mm thick, 200mm seam, 2 tails:
+    #   protrusion = max(1.5*4, 8) = 8mm
+    #   base_width = 4*4 = 16mm  ;  flare = 8 * tan(10°) = 1.41
+    #   top_width = 18.82mm
+    #   gap = (200 - 32) / 3 = 56mm
+    #   tail centers: -36, +36
+    l_min, l_max = world_bbox_x(left)
+    check(abs(l_min - (-150)) < 0.1, f"left X min ~ -150 (got {l_min:.2f})")
+    check(abs(l_max -    8) < 0.5,  f"left X max ~ +8 (tail outer end) (got {l_max:.2f})")
+
+    # Both tails should appear: vertices at x=8 (the tail outer face) on TWO
+    # disjoint Y bands — one near -36, one near +36.
+    tail_outer_ys = sorted(
+        round(v.co.y, 2)
+        for v in left.data.vertices
+        if abs((left.matrix_world @ v.co).x - 8) < 0.5
+    )
+    print(f"  tail-outer-corner Y values on left half: {tail_outer_ys}")
+    has_negative_band = any(y < -20 for y in tail_outer_ys)
+    has_positive_band = any(y >  20 for y in tail_outer_ys)
+    check(has_negative_band, f"tail at negative Y band: {tail_outer_ys}")
+    check(has_positive_band, f"tail at positive Y band: {tail_outer_ys}")
+    check(len(tail_outer_ys) >= 4,
+          f"both tails have outer corners (>= 4 verts at x=8): got {len(tail_outer_ys)}")
+
+
 def main():
     test_add_test_block()
     test_add_cut_plane()
@@ -276,6 +328,7 @@ def main():
     test_idempotent_recut()
     test_dovetail_cut()
     test_active_half_redirects_to_source()
+    test_multi_tail_dovetail_via_override()
 
     print("\n" + "=" * 50)
     if failures:
