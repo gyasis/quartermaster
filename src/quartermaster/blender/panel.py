@@ -70,12 +70,13 @@ class QM_PT_Panel(bpy.types.Panel):
 
         col.prop(scene, "qm_tolerance_mm", slider=True)
 
-        # --- 4. Cut ----------
+        # --- 4. Preview & Cut ----------
         layout.separator()
         col = layout.column(align=True)
-        col.label(text="4. Select target mesh, then cut")
-        col.label(text="    (ctrl-click extras to union)", icon="BLANK1")
-        col.operator("quartermaster.execute_cut", text="Cut Along Plane")
+        col.label(text="4. Preview & Cut", icon="MOD_BOOLEAN")
+        col.operator("quartermaster.preview_joint", text="Preview Joint", icon="HIDE_OFF")
+        col.label(text="    (ctrl-click extras to union)")
+        col.operator("quartermaster.execute_cut",   text="Cut Along Plane", icon="MOD_BOOLEAN")
 
         # --- Status ----------
         layout.separator()
@@ -90,6 +91,10 @@ class QM_PT_Panel(bpy.types.Panel):
         plane_str = plane.name if plane else "(none yet)"
         box.label(text=f"Target: {target_str}")
         box.label(text=f"Plane:  {plane_str}")
+
+        # --- Cleanup ----------
+        layout.separator()
+        layout.operator("quartermaster.reset_scene", text="Reset Scene (clear QM)", icon="TRASH")
 
 
 CLASSES = (QM_PT_Panel,)

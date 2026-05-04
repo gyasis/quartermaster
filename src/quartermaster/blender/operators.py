@@ -3,10 +3,13 @@ from __future__ import annotations
 import bpy
 from mathutils import Vector
 
-from ..joint_strategy import JointSpec, JointType
-from .adapter import add_cut_plane_helper, QM_CUT_PLANE_PROP
+from ..joint_strategy import JointSpec, JointType, pick_joint
+from ..joints.preview import joint_preview
+from .adapter import add_cut_plane_helper, cut_plane_from_empty, QM_CUT_PLANE_PROP
 from .cut import cut_along_plane
 from .fixtures import create_test_block
+
+QM_PREVIEW_NAME = "QM_JointPreview"
 
 
 def _find_cut_plane():
@@ -239,10 +242,142 @@ class QM_OT_ExecuteCut(bpy.types.Operator):
         return {"FINISHED"}
 
 
+def _measure_target(target, plane_empty):
+    """Return (thickness, seam_length) for the active target, or (None, None)
+    if there's no usable mesh."""
+    if target is None or target.type != "MESH" or target.get(QM_CUT_PLANE_PROP):
+        return None, None
+    base_plane = cut_plane_from_empty(plane_empty)
+    deps = bpy.context.evaluated_depsgraph_get()
+    ev = target.evaluated_get(deps)
+    ev_mesh = ev.to_mesh()
+    if not ev_mesh.vertices:
+        ev.to_mesh_clear()
+        return None, None
+    verts_w = [target.matrix_world @ v.co for v in ev_mesh.vertices]
+    ev.to_mesh_clear()
+    xs = [v.x for v in verts_w]; ys = [v.y for v in verts_w]; zs = [v.z for v in verts_w]
+    bbox_min = (min(xs), min(ys), min(zs))
+    bbox_max = (max(xs), max(ys), max(zs))
+    return base_plane.measure(bbox_min, bbox_max)
+
+
+class QM_OT_PreviewJoint(bpy.types.Operator):
+    """Show a wireframe preview of the current joint at the cut plane location.
+
+    The preview is a Blender object whose edges trace the joint's cut path.
+    It updates whenever you click — change the joint, click again to see it.
+    """
+    bl_idname = "quartermaster.preview_joint"
+    bl_label  = "Preview Joint"
+    bl_options = {"REGISTER", "UNDO"}
+
+    @classmethod
+    def poll(cls, context):
+        return _find_cut_plane() is not None
+
+    def execute(self, context):
+        plane = _find_cut_plane()
+        target = context.active_object
+        # Skip the preview itself if it's active
+        if target is not None and target.name == QM_PREVIEW_NAME:
+            target = None
+        thickness, seam_length = _measure_target(target, plane)
+        if thickness is None:
+            # No target — pick representative defaults so the user still sees
+            # the joint shape
+            thickness, seam_length = 4.0, 200.0
+
+        spec = _build_override_spec(context.scene)
+        if spec is None:
+            spec = pick_joint(thickness=thickness, seam_length=seam_length)
+        # Apply table_mm if set (matches what cut_along_plane does for SCARF)
+        table_mm = getattr(context.scene, "qm_table_mm", 0.0)
+        if table_mm > 0 and spec.joint == JointType.SCARF:
+            spec = JointSpec(
+                joint=spec.joint,
+                params={**spec.params, "table_mm": table_mm},
+                pin_count=spec.pin_count,
+                rationale=spec.rationale + f" | table {table_mm:.1f}mm",
+            )
+
+        try:
+            preview = joint_preview(spec, thickness=thickness, seam_length=seam_length)
+        except NotImplementedError as exc:
+            self.report({"ERROR"}, f"Preview not available: {exc}")
+            return {"CANCELLED"}
+
+        _make_preview_object(plane, preview, name=QM_PREVIEW_NAME)
+        self.report({"INFO"}, f"Preview: {preview.description}")
+        return {"FINISHED"}
+
+
+def _make_preview_object(plane_empty, preview, name):
+    """Create or replace a wireframe-only Blender object showing the joint preview."""
+    import bmesh
+    from mathutils import Vector
+
+    base_plane = cut_plane_from_empty(plane_empty)
+    n_axis = Vector(base_plane.normal).normalized()
+    s_axis = Vector(base_plane.seam_axis).normalized()
+    t_axis = n_axis.cross(s_axis).normalized()
+    p0     = Vector(base_plane.point)
+
+    if preview.axes == "n_t":
+        axis_x, axis_y = n_axis, t_axis
+    else:
+        axis_x, axis_y = n_axis, s_axis
+
+    # Replace any prior preview
+    if name in bpy.data.objects:
+        bpy.data.objects.remove(bpy.data.objects[name], do_unlink=True)
+
+    bm = bmesh.new()
+    for (a, b) in preview.lines_2d:
+        v1 = bm.verts.new(p0 + axis_x * a[0] + axis_y * a[1])
+        v2 = bm.verts.new(p0 + axis_x * b[0] + axis_y * b[1])
+        bm.edges.new([v1, v2])
+    # Merge coincident endpoints so shared corners draw once
+    bmesh.ops.remove_doubles(bm, verts=bm.verts[:], dist=1e-5)
+
+    mesh = bpy.data.meshes.new(f"{name}_mesh")
+    bm.to_mesh(mesh)
+    bm.free()
+    obj = bpy.data.objects.new(name, mesh)
+    obj.show_in_front = True
+    obj.show_wire     = True
+    obj.display_type  = "WIRE"
+    bpy.context.collection.objects.link(obj)
+    return obj
+
+
+class QM_OT_ResetScene(bpy.types.Operator):
+    """Remove all Quartermaster-generated objects (cut plane, halves,
+    baked intermediates, previews, fixtures) so the scene is clean.
+
+    Doesn't touch any objects you created yourself.
+    """
+    bl_idname = "quartermaster.reset_scene"
+    bl_label  = "Reset Scene (clear QM)"
+    bl_options = {"REGISTER", "UNDO"}
+
+    def execute(self, context):
+        prefixes = ("QM_", "_qm_", "_pin_")
+        removed = 0
+        for obj in list(bpy.data.objects):
+            if obj.name.startswith(prefixes):
+                bpy.data.objects.remove(obj, do_unlink=True)
+                removed += 1
+        self.report({"INFO"}, f"Removed {removed} Quartermaster object(s)")
+        return {"FINISHED"}
+
+
 CLASSES = (
     QM_OT_AddTestBlock,
     QM_OT_AddDovetailBlock,
     QM_OT_AddCutPlane,
     QM_OT_SnapCutPlane,
+    QM_OT_PreviewJoint,
     QM_OT_ExecuteCut,
+    QM_OT_ResetScene,
 )

@@ -599,6 +599,56 @@ def test_sliding_dovetail_via_picker():
         check(min(tenon_tip_zs) < -4.0, f"tenon flares wider in z at the tip (min z={min(tenon_tip_zs):.2f} < -4)")
 
 
+def test_preview_creates_wireframe():
+    print("\n[17] Joint preview creates wireframe object")
+    cleanup()
+    bpy.ops.quartermaster.add_test_block()
+    bpy.ops.quartermaster.add_cut_plane()
+    empty = bpy.data.objects["QM_CutPlane"]
+    empty.rotation_mode = "XYZ"
+    empty.rotation_euler = (0.0, math.pi / 2, 0.0)
+    bpy.context.view_layer.update()
+
+    block = bpy.data.objects["QM_TestBlock"]
+    bpy.ops.object.select_all(action="DESELECT")
+    block.select_set(True)
+    bpy.context.view_layer.objects.active = block
+
+    # AUTO -> picker chooses scarf for 4mm/200mm
+    bpy.ops.quartermaster.preview_joint()
+    check("QM_JointPreview" in bpy.data.objects, "preview object created")
+    preview = bpy.data.objects["QM_JointPreview"]
+    check(len(preview.data.edges) >= 1, f"preview has edges (got {len(preview.data.edges)})")
+    check(len(preview.data.polygons) == 0, "preview is wireframe-only (no faces)")
+
+    # Switch to dovetail and re-preview — should replace, not stack
+    bpy.context.scene.qm_joint_override = "DOVETAIL"
+    bpy.context.scene.qm_tail_count = 2
+    bpy.ops.quartermaster.preview_joint()
+    preview = bpy.data.objects["QM_JointPreview"]
+    # 2-tail dovetail path: 4*2+2 = 10 points -> 9 segments (edges)
+    check(len(preview.data.edges) == 9, f"2-tail preview has 9 edges (got {len(preview.data.edges)})")
+
+
+def test_reset_scene_clears_qm_objects():
+    print("\n[18] Reset Scene removes QM_-prefixed objects")
+    # Set up some QM stuff
+    bpy.ops.quartermaster.add_test_block()
+    bpy.ops.quartermaster.add_cut_plane()
+    qm_count_before = sum(1 for o in bpy.data.objects if o.name.startswith("QM_"))
+    check(qm_count_before > 0, f"QM objects exist before reset (got {qm_count_before})")
+
+    # Add a non-QM object that should survive
+    from quartermaster.blender.fixtures import create_test_block
+    keep = create_test_block(name="KeepMe", size=(50, 50, 5), location=(200, 0, 0))
+
+    bpy.ops.quartermaster.reset_scene()
+    qm_count_after = sum(1 for o in bpy.data.objects if o.name.startswith("QM_"))
+    check(qm_count_after == 0, f"all QM objects cleared (got {qm_count_after})")
+    check("KeepMe" in bpy.data.objects, "non-QM objects preserved")
+    bpy.data.objects.remove(bpy.data.objects["KeepMe"], do_unlink=True)
+
+
 def main():
     tests = [
         test_add_test_block,
@@ -617,6 +667,8 @@ def main():
         test_tolerance_expands_socket,
         test_half_lap_via_override,
         test_sliding_dovetail_via_picker,
+        test_preview_creates_wireframe,
+        test_reset_scene_clears_qm_objects,
     ]
     for t in tests:
         _reset_scene_props()
