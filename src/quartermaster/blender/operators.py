@@ -86,9 +86,13 @@ normal; local +Y is the seam direction."""
         empty.select_set(True)
         context.view_layer.objects.active = empty
 
+        # Headless Blender (CI) has no space_data, so the tool-set op raises
+        # AttributeError. Interactive sessions raise RuntimeError when the
+        # space isn't a 3D View. Swallow either; the gizmo show flags below
+        # do the work that matters in headless mode.
         try:
             bpy.ops.wm.tool_set_by_id(name="builtin.transform")
-        except (RuntimeError, TypeError):
+        except (RuntimeError, TypeError, AttributeError):
             pass
         for area in context.screen.areas:
             if area.type == "VIEW_3D":

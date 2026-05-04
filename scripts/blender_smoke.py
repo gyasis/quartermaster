@@ -105,8 +105,6 @@ def test_picker_unit_agrees_with_runtime():
 
 def test_smooth_scarf_cut():
     print("\n[4] Smooth scarf cut")
-    bpy.context.scene.qm_use_table_lock = False
-
     # Orient the cut plane: local +Z = world +X (perpendicular YZ cut)
     empty = bpy.data.objects["QM_CutPlane"]
     empty.rotation_mode = "XYZ"
