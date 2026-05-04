@@ -98,6 +98,10 @@ def cut_along_plane(
         from ..joints.finger import finger_path_2d
         path = finger_path_2d(spec, thickness, seam_length)
         left, right = _cut_with_path(baked, base_plane, path, thickness, seam_length, target_obj.name, tolerance_mm)
+    elif spec.joint == JointType.HALF_LAP:
+        left, right = _cut_half_lap(baked, base_plane, spec, thickness, target_obj.name)
+    elif spec.joint == JointType.SLIDING_DOVETAIL:
+        left, right = _cut_sliding_dovetail(baked, base_plane, spec, thickness, target_obj.name, tolerance_mm)
     else:
         bpy.data.objects.remove(baked, do_unlink=True)
         raise NotImplementedError(
@@ -423,6 +427,223 @@ def _make_prism(polygon_2d, base_plane, t_range, name):
     obj = bpy.data.objects.new(name, mesh)
     bpy.context.collection.objects.link(obj)
     return obj
+
+
+def _make_prism_seam(polygon_n_t, base_plane, s_range, name):
+    """Extrude a 2D (n', t') polygon along the seam axis between s_range = (s_min, s_max).
+
+    Mirror of `_make_prism` but with the polygon in the seam-cross-section
+    plane instead of the seam-along plane. Used by half-lap and sliding
+    dovetail, whose features run the full seam length.
+    """
+    import bpy, bmesh
+    from mathutils import Vector
+
+    n_axis = Vector(base_plane.normal).normalized()
+    s_axis = Vector(base_plane.seam_axis).normalized()
+    t_axis = n_axis.cross(s_axis).normalized()
+    p0     = Vector(base_plane.point)
+    s_min, s_max = s_range
+
+    bm = bmesh.new()
+    front_verts, back_verts = [], []
+    for (np_, tp_) in polygon_n_t:
+        front_verts.append(bm.verts.new(p0 + n_axis * np_ + s_axis * s_min + t_axis * tp_))
+        back_verts.append(bm.verts.new(p0 + n_axis * np_ + s_axis * s_max + t_axis * tp_))
+    bm.verts.ensure_lookup_table()
+    bm.faces.new(front_verts[::-1])
+    bm.faces.new(back_verts)
+    n = len(polygon_n_t)
+    for i in range(n):
+        j = (i + 1) % n
+        bm.faces.new([front_verts[i], back_verts[i], back_verts[j], front_verts[j]])
+    bmesh.ops.recalc_face_normals(bm, faces=bm.faces)
+
+    mesh = bpy.data.meshes.new(f"{name}_mesh")
+    bm.to_mesh(mesh)
+    bm.free()
+    obj = bpy.data.objects.new(name, mesh)
+    bpy.context.collection.objects.link(obj)
+    return obj
+
+
+def _cut_sliding_dovetail(baked, base_plane, spec, thickness, target_name, tolerance_mm: float = 0.0):
+    """Tenon (trapezoidal cross-section in n,t) on LEFT, matching groove on RIGHT.
+    Tenon runs the full seam length. Pure convex prism — robust booleans."""
+    import bpy
+    from mathutils import Vector
+    from ..joints.sliding_dovetail import sliding_dovetail_profile_2d
+
+    n_axis = Vector(base_plane.normal).normalized()
+    s_axis = Vector(base_plane.seam_axis).normalized()
+    t_axis = n_axis.cross(s_axis).normalized()
+    p0     = Vector(base_plane.point)
+
+    corners       = [baked.matrix_world @ Vector(c) for c in baked.bound_box]
+    pad           = 1.0
+    n_max         = max((c - p0).dot(n_axis) for c in corners) + pad
+    t_min_padded  = min((c - p0).dot(t_axis) for c in corners) - pad
+    t_max_padded  = max((c - p0).dot(t_axis) for c in corners) + pad
+    s_extents     = [(c - p0).dot(s_axis) for c in corners]
+    s_min_exact, s_max_exact = min(s_extents), max(s_extents)
+    s_min_padded, s_max_padded = s_min_exact - pad, s_max_exact + pad
+    half_t_padded = max(abs(t_min_padded), abs(t_max_padded)) + pad
+
+    # Step 1: perpendicular cut. Big-box covers +n half-space, full thickness, full seam.
+    big_box = _make_prism(
+        polygon_2d=[
+            (0.0,    s_min_padded),
+            (n_max,  s_min_padded),
+            (n_max,  s_max_padded),
+            (0.0,    s_max_padded),
+        ],
+        base_plane=base_plane,
+        t_range=(t_min_padded, t_max_padded),
+        name="_qm_big_box_sd",
+    )
+
+    def boolean_split(target, cutter, name, op):
+        obj = target.copy()
+        obj.data = target.data.copy()
+        obj.name = name
+        bpy.context.collection.objects.link(obj)
+        mod = obj.modifiers.new(name="qm_cut", type="BOOLEAN")
+        mod.object = cutter
+        mod.operation = op
+        mod.solver = "EXACT"
+        bpy.context.view_layer.objects.active = obj
+        bpy.ops.object.modifier_apply(modifier=mod.name)
+        return obj
+
+    left  = boolean_split(baked, big_box, target_name + "_L", "DIFFERENCE")
+    right = boolean_split(baked, big_box, target_name + "_R", "INTERSECT")
+    bpy.data.objects.remove(big_box, do_unlink=True)
+
+    # Step 2: build tenon prism (and optional larger socket prism for tolerance)
+    tenon_profile = sliding_dovetail_profile_2d(spec, thickness)
+    tenon = _make_prism_seam(tenon_profile, base_plane, (s_min_exact, s_max_exact), name="_qm_tenon")
+    if tolerance_mm > 0:
+        socket_profile = _offset_polygon(tenon_profile, tolerance_mm)
+        socket = _make_prism_seam(socket_profile, base_plane, (s_min_exact, s_max_exact), name="_qm_groove")
+    else:
+        socket = tenon
+
+    for half, cutter, op in [(left, tenon, "UNION"), (right, socket, "DIFFERENCE")]:
+        mod = half.modifiers.new(name="qm_sd", type="BOOLEAN")
+        mod.object = cutter
+        mod.operation = op
+        mod.solver = "EXACT"
+        bpy.context.view_layer.objects.active = half
+        bpy.ops.object.modifier_apply(modifier=mod.name)
+
+    bpy.data.objects.remove(tenon, do_unlink=True)
+    if socket is not tenon:
+        bpy.data.objects.remove(socket, do_unlink=True)
+
+    return left, right
+
+
+def _cut_half_lap(baked, base_plane, spec, thickness, target_name):
+    """Half-lap: composes from two simple convex boxes via independent booleans.
+
+      LEFT  = baked - top_box - bot_box
+      RIGHT = (baked & top_box) UNION (baked & bot_box)
+
+    Each cutter is a simple convex cube — no concave polygons or coincident
+    faces to confuse the boolean solver.
+    """
+    import bpy, bmesh
+    from mathutils import Vector
+    from ..joints.half_lap import half_lap_path_2d
+
+    path    = half_lap_path_2d(spec, thickness)
+    overlap = abs(path[0][0])
+
+    n_axis = Vector(base_plane.normal).normalized()
+    s_axis = Vector(base_plane.seam_axis).normalized()
+    t_axis = n_axis.cross(s_axis).normalized()
+    p0     = Vector(base_plane.point)
+
+    corners = [baked.matrix_world @ Vector(c) for c in baked.bound_box]
+    pad     = 1.0
+    n_max   = max((c - p0).dot(n_axis) for c in corners) + pad
+    s_min   = min((c - p0).dot(s_axis) for c in corners) - pad
+    s_max   = max((c - p0).dot(s_axis) for c in corners) + pad
+    t_min   = min((c - p0).dot(t_axis) for c in corners) - pad
+    t_max   = max((c - p0).dot(t_axis) for c in corners) + pad
+
+    def make_simple_box(n_lo, n_hi, t_lo, t_hi, name):
+        bm = bmesh.new()
+        geom = bmesh.ops.create_cube(bm, size=1.0)
+        n_size, s_size, t_size = n_hi - n_lo, s_max - s_min, t_hi - t_lo
+        for v in geom["verts"]:
+            n_p = n_lo  + (v.co.x + 0.5) * n_size
+            s_p = s_min + (v.co.y + 0.5) * s_size
+            t_p = t_lo  + (v.co.z + 0.5) * t_size
+            v.co = p0 + n_axis * n_p + s_axis * s_p + t_axis * t_p
+        mesh = bpy.data.meshes.new(f"{name}_mesh")
+        bm.to_mesh(mesh)
+        bm.free()
+        obj = bpy.data.objects.new(name, mesh)
+        bpy.context.collection.objects.link(obj)
+        return obj
+
+    # Each cutter extends very slightly past z=0 into the other's territory,
+    # so the boolean step sweeps up any boundary faces left at z=0 by the
+    # other cutter. Without this, a stray face from the previous DIFFERENCE
+    # at z=0 lingers in the result.
+    eps = 1e-3
+    top_box = make_simple_box(-overlap, n_max, -eps,   t_max, "_qm_hl_top")
+    bot_box = make_simple_box(+overlap, n_max, t_min,  +eps,  "_qm_hl_bot")
+
+    def apply_bool(target, cutter, op):
+        mod = target.modifiers.new(name="qm_cut", type="BOOLEAN")
+        mod.object = cutter
+        mod.operation = op
+        mod.solver = "EXACT"
+        bpy.context.view_layer.objects.active = target
+        bpy.ops.object.modifier_apply(modifier=mod.name)
+        # The EXACT solver can leave straggler verts/faces at coplanar
+        # cutter boundaries — clean those up.
+        bm = bmesh.new()
+        bm.from_mesh(target.data)
+        bmesh.ops.dissolve_degenerate(bm, dist=1e-4, edges=bm.edges[:])
+        # Drop any verts left without face connections after dissolve
+        loose_verts = [v for v in bm.verts if not v.link_faces]
+        if loose_verts:
+            bmesh.ops.delete(bm, geom=loose_verts, context="VERTS")
+        bm.to_mesh(target.data)
+        bm.free()
+
+    # LEFT = baked - top_box - bot_box
+    left = baked.copy()
+    left.data = baked.data.copy()
+    left.name = target_name + "_L"
+    bpy.context.collection.objects.link(left)
+    apply_bool(left, top_box, "DIFFERENCE")
+    apply_bool(left, bot_box, "DIFFERENCE")
+
+    # RIGHT = (baked & top_box) UNION (baked & bot_box)
+    right_top = baked.copy()
+    right_top.data = baked.data.copy()
+    right_top.name = "_qm_right_top_tmp"
+    bpy.context.collection.objects.link(right_top)
+    apply_bool(right_top, top_box, "INTERSECT")
+
+    right_bot = baked.copy()
+    right_bot.data = baked.data.copy()
+    right_bot.name = "_qm_right_bot_tmp"
+    bpy.context.collection.objects.link(right_bot)
+    apply_bool(right_bot, bot_box, "INTERSECT")
+
+    # UNION the two halves
+    apply_bool(right_top, right_bot, "UNION")
+    right = right_top
+    right.name = target_name + "_R"
+
+    for tmp in (top_box, bot_box, right_bot):
+        bpy.data.objects.remove(tmp, do_unlink=True)
+    return left, right
 
 
 def _drill_pin(pin, left, right, idx):

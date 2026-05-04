@@ -46,15 +46,27 @@ class QM_PT_Panel(bpy.types.Panel):
 
         col.prop(scene, "qm_joint_override", text="Joint")
 
-        is_dovetail_override = getattr(scene, "qm_joint_override", "AUTO") == "DOVETAIL"
-        sub = col.column(align=True)
-        sub.enabled = is_dovetail_override
-        sub.prop(scene, "qm_tail_count")
-        sub.prop(scene, "qm_dovetail_angle")
+        joint_mode = getattr(scene, "qm_joint_override", "AUTO")
+        is_dovetail = joint_mode == "DOVETAIL"
+        is_half_lap = joint_mode == "HALF_LAP"
+        is_sliding  = joint_mode == "SLIDING_DOVETAIL"
+        is_scarf    = joint_mode == "AUTO"  # picker often picks SCARF; allow table_mm
 
-        sub2 = col.column(align=True)
-        sub2.enabled = not is_dovetail_override   # table only meaningful for scarf
-        sub2.prop(scene, "qm_table_mm", slider=True)
+        sub_dt = col.column(align=True)
+        sub_dt.enabled = is_dovetail
+        sub_dt.prop(scene, "qm_tail_count")
+
+        sub_angle = col.column(align=True)
+        sub_angle.enabled = is_dovetail or is_sliding
+        sub_angle.prop(scene, "qm_dovetail_angle")
+
+        sub_lap = col.column(align=True)
+        sub_lap.enabled = is_half_lap
+        sub_lap.prop(scene, "qm_overlap_mm", slider=True)
+
+        sub_table = col.column(align=True)
+        sub_table.enabled = is_scarf  # tabled scarf only when picker chooses scarf
+        sub_table.prop(scene, "qm_table_mm", slider=True)
 
         col.prop(scene, "qm_tolerance_mm", slider=True)
 

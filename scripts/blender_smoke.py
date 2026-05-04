@@ -471,6 +471,7 @@ def _reset_scene_props():
     bpy.context.scene.qm_dovetail_angle = 10.0
     bpy.context.scene.qm_table_mm       = 0.0
     bpy.context.scene.qm_tolerance_mm   = 0.0
+    bpy.context.scene.qm_overlap_mm     = 10.0
 
 
 def test_tolerance_expands_socket():
@@ -518,6 +519,86 @@ def test_tolerance_expands_socket():
     check(abs(l_max - 9.0) < 0.05, f"tail outer end unchanged (got {l_max:.3f}, want 9.0)")
 
 
+def test_half_lap_via_override():
+    print("\n[15] Half-lap via panel override")
+    cleanup()
+    from quartermaster.blender.fixtures import create_test_block
+    block = create_test_block(name="QM_HalfLapBlock", size=(120.0, 60.0, 6.0), location=(0.0, 0.0, 0.0))
+    bpy.ops.quartermaster.add_cut_plane()
+    empty = bpy.data.objects["QM_CutPlane"]
+    empty.rotation_mode = "XYZ"
+    empty.rotation_euler = (0.0, math.pi / 2, 0.0)
+    bpy.context.view_layer.update()
+
+    bpy.context.scene.qm_joint_override = "HALF_LAP"
+    bpy.context.scene.qm_overlap_mm     = 10.0
+    bpy.ops.object.select_all(action="DESELECT")
+    block.select_set(True)
+    bpy.context.view_layer.objects.active = block
+    bpy.ops.quartermaster.execute_cut()
+
+    check("QM_HalfLapBlock_L" in bpy.data.objects, "left half created")
+    check("QM_HalfLapBlock_R" in bpy.data.objects, "right half created")
+    left  = bpy.data.objects["QM_HalfLapBlock_L"]
+    right = bpy.data.objects["QM_HalfLapBlock_R"]
+
+    # Half-lap geometry:
+    #   LEFT  = full at n<-overlap, BOTTOM half (z<0) at n in [-overlap, +overlap]
+    #   RIGHT = full at n>+overlap, TOP    half (z>0) at n in [-overlap, +overlap]
+    # bbox X-max for LEFT: +10 (where the bottom-half lap ends)
+    l_max = max((left.matrix_world @ v.co).x for v in left.data.vertices)
+    check(abs(l_max - 10.0) < 0.5, f"left bbox X max ~ +10 (bottom-lap end) (got {l_max:.2f})")
+    # bbox X-min for RIGHT: -10 (where the top-half lap starts)
+    r_min = min((right.matrix_world @ v.co).x for v in right.data.vertices)
+    check(abs(r_min - (-10.0)) < 0.5, f"right bbox X min ~ -10 (top-lap start) (got {r_min:.2f})")
+
+    # LEFT's TOP face (z=+3) only exists for n < -overlap (no top material in the lap)
+    l_top_xs = sorted({round((left.matrix_world @ v.co).x, 2)
+                       for v in left.data.vertices
+                       if abs((left.matrix_world @ v.co).z - (+3.0)) < 0.1})
+    check(max(l_top_xs) <= -10.0 + 0.5,
+          f"left's top face ends at x=-10 (no top material in the lap): xs={l_top_xs}")
+
+
+def test_sliding_dovetail_via_picker():
+    print("\n[16] Sliding dovetail (picker chooses for thick + long seam)")
+    cleanup()
+    from quartermaster.blender.fixtures import create_test_block
+    # 12mm thick, 200mm seam → picker returns SLIDING_DOVETAIL
+    block = create_test_block(name="QM_SlidingBlock", size=(160.0, 200.0, 12.0), location=(0.0, 0.0, 0.0))
+    bpy.ops.quartermaster.add_cut_plane()
+    empty = bpy.data.objects["QM_CutPlane"]
+    empty.rotation_mode = "XYZ"
+    empty.rotation_euler = (0.0, math.pi / 2, 0.0)
+    bpy.context.view_layer.update()
+
+    bpy.context.scene.qm_joint_override = "AUTO"
+    bpy.ops.object.select_all(action="DESELECT")
+    block.select_set(True)
+    bpy.context.view_layer.objects.active = block
+    bpy.ops.quartermaster.execute_cut()
+
+    check("QM_SlidingBlock_L" in bpy.data.objects, "left half created")
+    check("QM_SlidingBlock_R" in bpy.data.objects, "right half created")
+    left  = bpy.data.objects["QM_SlidingBlock_L"]
+    right = bpy.data.objects["QM_SlidingBlock_R"]
+
+    # 12mm thick → picker depth_mm = 12*0.6 = 7.2; angle=12, base_width = max(12*0.5, 6) = 6
+    # → flare = 7.2*tan(12°) = 1.53; top_width = 9.06; half_top = 4.53
+    # LEFT tenon tip at n = +depth = +7.2.
+    l_max = max((left.matrix_world @ v.co).x for v in left.data.vertices)
+    check(abs(l_max - 7.2) < 0.5, f"left tenon tip ~ +7.2 (picker depth) (got {l_max:.2f})")
+
+    # The flare in t-direction at the tip — top_width=9.06, so half_top ≈ 4.53.
+    tenon_tip_zs = sorted({round((left.matrix_world @ v.co).z, 2)
+                           for v in left.data.vertices
+                           if abs((left.matrix_world @ v.co).x - 7.2) < 0.5})
+    check(len(tenon_tip_zs) >= 2, f"tenon tip has corner verts in z (got {tenon_tip_zs})")
+    if tenon_tip_zs:
+        check(max(tenon_tip_zs) > 4.0, f"tenon flares wider in z at the tip (max z={max(tenon_tip_zs):.2f} > 4)")
+        check(min(tenon_tip_zs) < -4.0, f"tenon flares wider in z at the tip (min z={min(tenon_tip_zs):.2f} < -4)")
+
+
 def main():
     tests = [
         test_add_test_block,
@@ -534,6 +615,8 @@ def main():
         test_dovetail_via_panel_override,
         test_multi_object_union,
         test_tolerance_expands_socket,
+        test_half_lap_via_override,
+        test_sliding_dovetail_via_picker,
     ]
     for t in tests:
         _reset_scene_props()

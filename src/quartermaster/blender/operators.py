@@ -156,7 +156,22 @@ def _build_override_spec(scene) -> "JointSpec | None":
             pin_count=0,
             rationale="user override (panel)",
         )
-    return None  # SCARF override: just let picker handle it; table_mm acts on it
+    if mode == "HALF_LAP":
+        return JointSpec(
+            JointType.HALF_LAP,
+            {"overlap_mm": scene.qm_overlap_mm},
+            pin_count=0,
+            rationale="user override (panel)",
+        )
+    if mode == "SLIDING_DOVETAIL":
+        # depth/base_width default from generator; user controls angle
+        return JointSpec(
+            JointType.SLIDING_DOVETAIL,
+            {"angle_deg": scene.qm_dovetail_angle},
+            pin_count=0,
+            rationale="user override (panel)",
+        )
+    return None
 
 
 class QM_OT_ExecuteCut(bpy.types.Operator):

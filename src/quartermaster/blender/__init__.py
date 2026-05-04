@@ -40,6 +40,7 @@ _SCENE_PROPS = (
     "qm_dovetail_angle",
     "qm_table_mm",
     "qm_tolerance_mm",
+    "qm_overlap_mm",
     # Older boolean kept for migration only — drop after a release
     "qm_use_table_lock",
 )
@@ -54,8 +55,10 @@ def register():
         name="Joint",
         description="Force a joint type, or AUTO to use the picker",
         items=[
-            ("AUTO",     "Auto (picker)", "Use the picker's automatic choice"),
-            ("DOVETAIL", "Dovetail",      "Force a dovetail (trapezoidal flare)"),
+            ("AUTO",             "Auto (picker)",     "Use the picker's automatic choice"),
+            ("DOVETAIL",         "Dovetail",          "Trapezoidal flare in the seam plane"),
+            ("HALF_LAP",         "Half-lap",          "Z-shape cut: each half keeps half thickness across the lap"),
+            ("SLIDING_DOVETAIL", "Sliding dovetail",  "Trapezoidal tenon flaring through thickness, slides along seam"),
         ],
         default="AUTO",
     )
@@ -78,6 +81,11 @@ def register():
         name="Print clearance (mm)",
         description="Per-side clearance between tail and socket — needed for FDM (typical 0.1-0.2)",
         default=0.15, min=0.0, max=2.0, soft_max=0.5, subtype="DISTANCE",
+    )
+    bpy.types.Scene.qm_overlap_mm = bpy.props.FloatProperty(
+        name="Half-lap overlap (mm)",
+        description="Lap distance per side for half-lap joint",
+        default=10.0, min=0.0, max=200.0, soft_max=50.0, subtype="DISTANCE",
     )
 
     for cls in (*operators.CLASSES, *panel.CLASSES):
