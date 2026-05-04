@@ -17,6 +17,56 @@ class CutResult:
     seam_length: float
 
 
+def _measure_cross_section(baked_obj, base_plane):
+    """Measure the cross-section where `base_plane` intersects the part.
+
+    Bisects a temporary bmesh copy of the part with the cut plane and returns
+    the (n,s,t)-local bounding box of the resulting cut edges. Returns None
+    if the cut plane doesn't intersect the part.
+
+    Asymmetric assemblies (plate + tall boss) have a bbox that doesn't match
+    the local material thickness at the cut. Using the cross-section instead
+    lets the picker and the joint generator see what's actually there.
+    """
+    import bmesh
+    from mathutils import Vector
+
+    n_axis = Vector(base_plane.normal).normalized()
+    s_axis = Vector(base_plane.seam_axis).normalized()
+    t_axis = n_axis.cross(s_axis).normalized()
+    p0     = Vector(base_plane.point)
+
+    bm = bmesh.new()
+    bm.from_mesh(baked_obj.data)
+    bm.transform(baked_obj.matrix_world)
+
+    bmesh.ops.bisect_plane(
+        bm,
+        geom=bm.verts[:] + bm.edges[:] + bm.faces[:],
+        plane_co=p0,
+        plane_no=n_axis,
+        clear_inner=True,
+        clear_outer=True,
+    )
+
+    if not bm.verts:
+        bm.free()
+        return None
+
+    s_vals = [(v.co - p0).dot(s_axis) for v in bm.verts]
+    t_vals = [(v.co - p0).dot(t_axis) for v in bm.verts]
+    bm.free()
+
+    return {
+        "thickness":   max(t_vals) - min(t_vals),
+        "seam_length": max(s_vals) - min(s_vals),
+        "t_min":       min(t_vals),
+        "t_max":       max(t_vals),
+        "s_min":       min(s_vals),
+        "s_max":       max(s_vals),
+    }
+
+
 def cut_along_plane(
     target_obj,
     plane_empty,
@@ -62,7 +112,18 @@ def cut_along_plane(
     xs = [c.x for c in corners]; ys = [c.y for c in corners]; zs = [c.z for c in corners]
     bbox_min = (min(xs), min(ys), min(zs))
     bbox_max = (max(xs), max(ys), max(zs))
-    thickness, seam_length = base_plane.measure(bbox_min, bbox_max)
+
+    # Prefer cross-section measurement over bbox so asymmetric assemblies
+    # (e.g., plate + tall boss) get joint proportions matching what the cut
+    # actually intersects, not what the bbox happens to contain.
+    xsect = _measure_cross_section(baked, base_plane)
+    if xsect is not None:
+        thickness     = xsect["thickness"]
+        seam_length   = xsect["seam_length"]
+        local_t_range = (xsect["t_min"], xsect["t_max"])
+    else:
+        thickness, seam_length = base_plane.measure(bbox_min, bbox_max)
+        local_t_range = None
 
     if override_spec is not None:
         spec = override_spec
@@ -93,15 +154,15 @@ def cut_along_plane(
     elif spec.joint == JointType.DOVETAIL:
         from ..joints.dovetail import dovetail_path_2d
         path = dovetail_path_2d(spec, thickness, seam_length)
-        left, right = _cut_with_path(baked, base_plane, path, thickness, seam_length, target_obj.name, tolerance_mm)
+        left, right = _cut_with_path(baked, base_plane, path, thickness, seam_length, target_obj.name, tolerance_mm, local_t_range)
     elif spec.joint == JointType.FINGER:
         from ..joints.finger import finger_path_2d
         path = finger_path_2d(spec, thickness, seam_length)
-        left, right = _cut_with_path(baked, base_plane, path, thickness, seam_length, target_obj.name, tolerance_mm)
+        left, right = _cut_with_path(baked, base_plane, path, thickness, seam_length, target_obj.name, tolerance_mm, local_t_range)
     elif spec.joint == JointType.BOX:
         from ..joints.box import box_path_2d
         path = box_path_2d(spec, thickness, seam_length)
-        left, right = _cut_with_path(baked, base_plane, path, thickness, seam_length, target_obj.name, tolerance_mm)
+        left, right = _cut_with_path(baked, base_plane, path, thickness, seam_length, target_obj.name, tolerance_mm, local_t_range)
     elif spec.joint == JointType.HALF_LAP:
         left, right = _cut_half_lap(baked, base_plane, spec, thickness, target_obj.name)
     elif spec.joint == JointType.SLIDING_DOVETAIL:
@@ -237,22 +298,25 @@ def _build_scarf_cutter(plate_obj, base_plane, spec, thickness, name):
     return obj
 
 
-def _cut_with_path(baked, base_plane, path, thickness, seam_length, target_name, tolerance_mm: float = 0.0):
+def _cut_with_path(baked, base_plane, path, thickness, seam_length, target_name,
+                   tolerance_mm: float = 0.0, local_t_range=None):
     """Two-step path-based cut. Avoids non-convex cutter polygons (which
     confuse the EXACT boolean solver on multi-feature input meshes) by:
 
       1) Simple perpendicular cut with a big convex box covering +n half-space.
       2) For each "indentation" in the path (subsequence with n' > 0), build a
          convex prism for it and add to LEFT (UNION) / remove from RIGHT
-         (DIFFERENCE). Each indentation is the trapezoid (dovetail) or
-         rectangle (finger) of one tail/finger feature.
+         (DIFFERENCE).
 
-    `tolerance_mm` adds FDM clearance: the socket prism is expanded outward
-    by this amount so the printed pieces slot together with `tolerance_mm`
-    of clearance per side. Tail prism stays original size.
-
-    Both steps use only convex shapes for booleans, which the solver handles
-    reliably even on unioned multi-object inputs.
+    Args:
+      tolerance_mm: FDM clearance on the socket prism (RIGHT only).
+      local_t_range: (t_min, t_max) for the *tail* prism — should match the
+                     cross-section at the cut, not the full bbox. When the
+                     part is an asymmetric assembly (plate + tall boss), the
+                     bbox would extend the tail past the plate's local
+                     thickness; the cross-section keeps it confined. Big-box
+                     cutter still uses padded bbox so the perpendicular cut
+                     reaches every protrusion.
     """
     import bpy
     from mathutils import Vector
@@ -268,10 +332,14 @@ def _cut_with_path(baked, base_plane, path, thickness, seam_length, target_name,
     # Padded t-range for the cutting big-box (boolean robustness)
     t_min_padded  = min((c - p0).dot(t_axis) for c in corners) - pad
     t_max_padded  = max((c - p0).dot(t_axis) for c in corners) + pad
-    # Unpadded t-range for the tail UNION step — UNION must not extend the
-    # part past its actual surfaces.
-    t_min_exact   = min((c - p0).dot(t_axis) for c in corners)
-    t_max_exact   = max((c - p0).dot(t_axis) for c in corners)
+    # Tail UNION step uses the cross-section t-range when supplied so the
+    # tail doesn't poke past the part's local thickness in asymmetric
+    # assemblies. Falls back to bbox extents.
+    if local_t_range is not None:
+        t_min_exact, t_max_exact = local_t_range
+    else:
+        t_min_exact = min((c - p0).dot(t_axis) for c in corners)
+        t_max_exact = max((c - p0).dot(t_axis) for c in corners)
     half_seam_pad = seam_length / 2 + pad
 
     # Step 1: perpendicular cut

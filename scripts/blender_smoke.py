@@ -437,10 +437,14 @@ def test_multi_object_union():
     plate  = create_test_block(name="QM_UnionPlate",  size=(300.0, 200.0, 4.0), location=(0.0, 0.0, 0.0))
     flange = create_test_block(name="QM_UnionFlange", size=( 40.0,  40.0, 4.0), location=(170.0, 0.0, 0.0))
 
+    # Activate plate so the cut plane lands at plate center (origin),
+    # not at flange center.
+    bpy.context.view_layer.objects.active = plate
     bpy.ops.quartermaster.add_cut_plane()
     empty = bpy.data.objects["QM_CutPlane"]
     empty.rotation_mode = "XYZ"
     empty.rotation_euler = (0.0, math.pi / 2, 0.0)
+    empty.location = (0.0, 0.0, 0.0)
     bpy.context.view_layer.update()
 
     # Both 4mm — picker would say SCARF; pin the joint so the test is deterministic
@@ -599,6 +603,55 @@ def test_sliding_dovetail_via_picker():
         check(min(tenon_tip_zs) < -4.0, f"tenon flares wider in z at the tip (min z={min(tenon_tip_zs):.2f} < -4)")
 
 
+def test_per_region_thickness_asymmetric_assembly():
+    print("\n[A] Asymmetric assembly: thickness measured at cut, not bbox")
+    cleanup()
+    from quartermaster.blender.fixtures import create_test_block
+    # Plate (4mm) + tall boss (12mm) sitting on top, far from the cut.
+    # bbox thickness = 14mm (would route picker to SLIDING_DOVETAIL with
+    # gigantic tenon); cross-section at x=0 sees only the plate -> 4mm,
+    # which routes to scarf 8:1 — the right joint for the local stock.
+    plate = create_test_block(name="QM_AsymmPlate", size=(300.0, 200.0, 4.0), location=(0.0, 0.0, 0.0))
+    boss  = create_test_block(name="QM_AsymmBoss",  size=(40.0, 40.0, 12.0), location=(80.0, 0.0, 6.0))
+
+    # Cut plane at origin so the bisect intersects the plate (not the boss)
+    bpy.context.view_layer.objects.active = plate
+    bpy.ops.quartermaster.add_cut_plane()
+    empty = bpy.data.objects["QM_CutPlane"]
+    empty.rotation_mode = "XYZ"
+    empty.rotation_euler = (0.0, math.pi / 2, 0.0)
+    empty.location = (0.0, 0.0, 0.0)
+    bpy.context.view_layer.update()
+
+    # Force DOVETAIL so we exercise the path cutter on an asymmetric input.
+    bpy.context.scene.qm_joint_override = "DOVETAIL"
+    bpy.context.scene.qm_tail_count = 1
+    bpy.context.scene.qm_dovetail_angle = 10.0
+    bpy.context.scene.qm_table_mm = 0.0
+    bpy.context.scene.qm_tolerance_mm = 0.0
+
+    bpy.ops.object.select_all(action="DESELECT")
+    boss.select_set(True)
+    plate.select_set(True)
+    bpy.context.view_layer.objects.active = plate
+    bpy.ops.quartermaster.execute_cut()
+
+    check("QM_AsymmPlate_L" in bpy.data.objects, "left half created")
+    check("QM_AsymmPlate_R" in bpy.data.objects, "right half created")
+
+    right = bpy.data.objects["QM_AsymmPlate_R"]
+    r_z_max = max((right.matrix_world @ v.co).z for v in right.data.vertices)
+    check(r_z_max > 5, f"right half includes the boss above plate top (got z_max={r_z_max:.2f})")
+
+    # The critical check: LEFT must NOT extend in z past the plate.
+    # With bbox-thickness, the dovetail tail prism would reach z=12 (boss top)
+    # and UNION-extend LEFT into a 14mm-tall pillar at the tail location.
+    # With cross-section thickness, tail stays in plate's z range.
+    left = bpy.data.objects["QM_AsymmPlate_L"]
+    l_z_max = max((left.matrix_world @ v.co).z for v in left.data.vertices)
+    check(l_z_max <= 2.5, f"left half stays at plate thickness (got z_max={l_z_max:.2f}, want ≤ 2.5)")
+
+
 def test_box_via_picker():
     print("\n[17] Box joint (picker chooses for thick + short seam)")
     cleanup()
@@ -703,6 +756,7 @@ def main():
         test_half_lap_via_override,
         test_sliding_dovetail_via_picker,
         test_box_via_picker,
+        test_per_region_thickness_asymmetric_assembly,
         test_preview_creates_wireframe,
         test_reset_scene_clears_qm_objects,
     ]
