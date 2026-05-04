@@ -98,6 +98,10 @@ def cut_along_plane(
         from ..joints.finger import finger_path_2d
         path = finger_path_2d(spec, thickness, seam_length)
         left, right = _cut_with_path(baked, base_plane, path, thickness, seam_length, target_obj.name, tolerance_mm)
+    elif spec.joint == JointType.BOX:
+        from ..joints.box import box_path_2d
+        path = box_path_2d(spec, thickness, seam_length)
+        left, right = _cut_with_path(baked, base_plane, path, thickness, seam_length, target_obj.name, tolerance_mm)
     elif spec.joint == JointType.HALF_LAP:
         left, right = _cut_half_lap(baked, base_plane, spec, thickness, target_obj.name)
     elif spec.joint == JointType.SLIDING_DOVETAIL:

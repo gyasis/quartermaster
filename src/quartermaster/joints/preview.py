@@ -18,6 +18,7 @@ from ..joint_strategy import JointSpec, JointType
 from .scarf            import scarf_path_2d
 from .dovetail         import dovetail_path_2d
 from .finger           import finger_path_2d
+from .box              import box_path_2d
 from .half_lap         import half_lap_path_2d
 from .sliding_dovetail import sliding_dovetail_profile_2d
 
@@ -104,6 +105,15 @@ def joint_preview(
             lines_2d=_open_polyline(path),
             axes="n_s",
             description=f"Finger joint, {n_fingers} fingers",
+        )
+
+    if j == JointType.BOX:
+        path = box_path_2d(spec, thickness, seam_length)
+        finger_count = spec.params.get("finger_count", 3)
+        return JointPreview(
+            lines_2d=_open_polyline(path),
+            axes="n_s",
+            description=f"Box joint, {finger_count} square fingers",
         )
 
     raise NotImplementedError(f"No preview for joint type {j.value}")

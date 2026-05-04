@@ -599,6 +599,41 @@ def test_sliding_dovetail_via_picker():
         check(min(tenon_tip_zs) < -4.0, f"tenon flares wider in z at the tip (min z={min(tenon_tip_zs):.2f} < -4)")
 
 
+def test_box_via_picker():
+    print("\n[17] Box joint (picker chooses for thick + short seam)")
+    cleanup()
+    from quartermaster.blender.fixtures import create_test_block
+    # 12mm thick, 60mm seam -> picker returns BOX
+    block = create_test_block(name="QM_BoxBlock", size=(80.0, 60.0, 12.0), location=(0.0, 0.0, 0.0))
+    bpy.ops.quartermaster.add_cut_plane()
+    empty = bpy.data.objects["QM_CutPlane"]
+    empty.rotation_mode = "XYZ"
+    empty.rotation_euler = (0.0, math.pi / 2, 0.0)
+    bpy.context.view_layer.update()
+
+    bpy.context.scene.qm_joint_override = "AUTO"
+    bpy.context.scene.qm_tolerance_mm = 0.0
+    bpy.ops.object.select_all(action="DESELECT")
+    block.select_set(True)
+    bpy.context.view_layer.objects.active = block
+    bpy.ops.quartermaster.execute_cut()
+
+    check("QM_BoxBlock_L" in bpy.data.objects, "left half created")
+    check("QM_BoxBlock_R" in bpy.data.objects, "right half created")
+    left = bpy.data.objects["QM_BoxBlock_L"]
+
+    # 3 fingers default, depth=thickness=12 → finger tips at x=12
+    l_max = max((left.matrix_world @ v.co).x for v in left.data.vertices)
+    check(abs(l_max - 12.0) < 0.5, f"left box-finger tip at x=+12 (got {l_max:.2f})")
+
+    # finger_width = seam_length / (2*N+1) = 60/7 ≈ 8.57
+    # 3 fingers, alternating with 4 gaps. Verts at x=12 should appear at 6 distinct Y positions.
+    finger_outer_ys = sorted({round((left.matrix_world @ v.co).y, 2)
+                              for v in left.data.vertices
+                              if abs((left.matrix_world @ v.co).x - 12.0) < 0.5})
+    check(len(finger_outer_ys) == 6, f"3 fingers -> 6 outer-corner Ys (got {len(finger_outer_ys)}: {finger_outer_ys})")
+
+
 def test_preview_creates_wireframe():
     print("\n[17] Joint preview creates wireframe object")
     cleanup()
@@ -667,6 +702,7 @@ def main():
         test_tolerance_expands_socket,
         test_half_lap_via_override,
         test_sliding_dovetail_via_picker,
+        test_box_via_picker,
         test_preview_creates_wireframe,
         test_reset_scene_clears_qm_objects,
     ]
