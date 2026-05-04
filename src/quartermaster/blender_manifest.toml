@@ -1,0 +1,21 @@
+schema_version = "1.0.0"
+
+id      = "quartermaster"
+version = "0.0.2"
+name    = "Quartermaster"
+tagline = "Auto-split prints with the right joinery for the stock"
+maintainer = "Gyasi Sutton <gyasis@gmail.com>"
+type    = "add-on"
+
+# Required Blender version
+blender_version_min = "4.2.0"
+
+# SPDX license — GPL because Blender's bpy requires GPL derivatives
+license = ["SPDX:GPL-2.0-or-later"]
+
+# Discoverability
+tags    = ["Mesh", "3D View"]
+website = "https://github.com/gyasis/quartermaster"
+
+# Permissions: none. Quartermaster does pure mesh ops on data already in the
+# scene — no network, no file system access, no clipboard.

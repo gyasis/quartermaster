@@ -12,7 +12,7 @@ called, so the bpy import inside `.blender` never happens.
 bl_info = {
     "name":        "Quartermaster",
     "author":      "Gyasi Sutton",
-    "version":     (0, 0, 1),
+    "version":     (0, 0, 2),
     "blender":     (4, 0, 0),
     "location":    "View3D > N > Quartermaster",
     "description": "Auto-split oversized prints with the right joinery for the stock thickness",

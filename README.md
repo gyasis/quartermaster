@@ -97,17 +97,23 @@ The smoke test exercises every operator end-to-end on real meshes and asserts on
 
 ## Install
 
-**From a release** (recommended): grab `quartermaster.zip` from the [Releases page](https://github.com/gyasis/quartermaster/releases), then in Blender:
+Two install paths depending on your Blender version. Both download from the same [Releases page](https://github.com/gyasis/quartermaster/releases):
 
-> _Edit > Preferences > Add-ons > Install..._ → select the zip → enable the **Quartermaster** checkbox.
+**Blender 4.2+ (extension format, recommended)** — download `quartermaster-extension.zip`. In Blender:
 
-**From source** (for hacking): clone the repo and build the zip yourself.
+> _Edit → Preferences → Get Extensions → ⌄ → Install from Disk..._ → select the zip.
+
+**Blender 4.0 / 4.1 (legacy add-on)** — download `quartermaster.zip`. In Blender:
+
+> _Edit → Preferences → Add-ons → Install..._ → select the zip → enable the **Quartermaster** checkbox.
+
+**From source** (for hacking): clone the repo and build the zips yourself.
 
 ```sh
 git clone https://github.com/gyasis/quartermaster.git
 cd quartermaster
 ./scripts/build_addon.sh
-# Install dist/quartermaster.zip via Edit > Preferences > Add-ons > Install...
+# Outputs dist/quartermaster.zip (legacy) and dist/quartermaster-extension.zip
 ```
 
 **Dev mode** (no install — useful when iterating on the code): in Blender's Python console,
@@ -118,5 +124,3 @@ sys.path.insert(0, "/absolute/path/to/quartermaster/src")
 import quartermaster
 quartermaster.register()
 ```
-
-Packaging as an `extensions.blender.org` extension is on the roadmap.
