@@ -1,5 +1,7 @@
 # Quartermaster
 
+[![CI](https://github.com/gyasis/quartermaster/actions/workflows/ci.yml/badge.svg)](https://github.com/gyasis/quartermaster/actions/workflows/ci.yml)
+
 Auto-split prints that exceed your build plate, with the right joinery for the stock thickness — a Blender add-on.
 
 ![Dovetail cut on a 300×200×4 mm test block — both halves shown, panel UI visible](docs/screenshots/hero-dovetail.png)
@@ -93,15 +95,28 @@ blender --background --python scripts/blender_smoke.py
 
 The smoke test exercises every operator end-to-end on real meshes and asserts on output geometry. CI runs the same script on every push (see [`.github/workflows/ci.yml`](.github/workflows/ci.yml)).
 
-## Installing as a local add-on
+## Install
 
-For a one-session install (development mode), in Blender's Python console:
+**From a release** (recommended): grab `quartermaster.zip` from the [Releases page](https://github.com/gyasis/quartermaster/releases), then in Blender:
+
+> _Edit > Preferences > Add-ons > Install..._ → select the zip → enable the **Quartermaster** checkbox.
+
+**From source** (for hacking): clone the repo and build the zip yourself.
+
+```sh
+git clone https://github.com/gyasis/quartermaster.git
+cd quartermaster
+./scripts/build_addon.sh
+# Install dist/quartermaster.zip via Edit > Preferences > Add-ons > Install...
+```
+
+**Dev mode** (no install — useful when iterating on the code): in Blender's Python console,
 
 ```python
 import sys
-sys.path.insert(0, "/path/to/quartermaster/src")
-import quartermaster.blender
-quartermaster.blender.register()
+sys.path.insert(0, "/absolute/path/to/quartermaster/src")
+import quartermaster
+quartermaster.register()
 ```
 
-For a permanent install: zip `src/quartermaster/blender/` and load via _Edit > Preferences > Add-ons > Install_. Packaging as an `extensions.blender.org` extension is on the roadmap.
+Packaging as an `extensions.blender.org` extension is on the roadmap.
