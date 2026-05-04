@@ -26,6 +26,7 @@ if str(QM_SRC) not in sys.path:
     sys.path.insert(0, str(QM_SRC))
 
 import bpy  # noqa: E402
+from mathutils import Vector  # noqa: E402
 
 # Always reload — picks up source edits during dev
 for mod_name in [m for m in list(sys.modules) if m.startswith("quartermaster")]:
@@ -147,7 +148,7 @@ def test_tabled_scarf_cut():
     empty.rotation_euler = (0.0, math.pi / 2, 0.0)
     bpy.context.view_layer.update()
 
-    bpy.context.scene.qm_use_table_lock = True
+    bpy.context.scene.qm_table_mm = 8.0  # explicit lock-step width via slider
     block = bpy.data.objects["QM_TestBlock"]
     bpy.ops.object.select_all(action="DESELECT")
     block.select_set(True)
@@ -211,7 +212,8 @@ def test_dovetail_cut():
     empty.rotation_euler = (0.0, math.pi / 2, 0.0)
     bpy.context.view_layer.update()
 
-    bpy.context.scene.qm_use_table_lock = False
+    bpy.context.scene.qm_table_mm = 0.0
+    bpy.context.scene.qm_joint_override = "AUTO"
     block = bpy.data.objects["QM_DovetailBlock"]
     bpy.ops.object.select_all(action="DESELECT")
     block.select_set(True)
@@ -247,7 +249,8 @@ def test_active_half_redirects_to_source():
     empty.rotation_euler = (0.0, math.pi / 2, 0.0)
     bpy.context.view_layer.update()
 
-    bpy.context.scene.qm_use_table_lock = False
+    bpy.context.scene.qm_table_mm = 0.0
+    bpy.context.scene.qm_joint_override = "AUTO"
     block = bpy.data.objects["QM_TestBlock"]
     bpy.ops.object.select_all(action="DESELECT")
     block.select_set(True)
@@ -319,16 +322,179 @@ def test_multi_tail_dovetail_via_override():
           f"both tails have outer corners (>= 4 verts at x=8): got {len(tail_outer_ys)}")
 
 
+def test_finger_cut_via_picker():
+    print("\n[10] Finger joint (via picker on long-seam block)")
+    cleanup()
+    # 400x150x4mm block: thickness=4 (3-5mm), seam=150 (medium-ish)... actually picker picks SCARF for medium.
+    # Need long_seam (> 300). Use 400x150x4 with cut along Y -> seam = 150 = medium.
+    # Use 500x100x4 with cut along Y -> seam = 100mm, picker = SCARF medium too.
+    # Force a long seam: use a 400-long block and cut perpendicular to its short axis.
+    # 200x400x4 with cut along Y axis = seam_length=400 (long_seam) → picker = FINGER.
+    from quartermaster.blender.fixtures import create_test_block
+    block = create_test_block(name="QM_FingerBlock", size=(200.0, 400.0, 4.0), location=(0.0, 0.0, 0.0))
+
+    bpy.ops.quartermaster.add_cut_plane()
+    empty = bpy.data.objects["QM_CutPlane"]
+    empty.rotation_mode = "XYZ"
+    empty.rotation_euler = (0.0, math.pi / 2, 0.0)  # cut perpendicular to X (seam runs along Y, length 400)
+    bpy.context.view_layer.update()
+
+    bpy.context.scene.qm_table_mm = 0.0
+    bpy.context.scene.qm_joint_override = "AUTO"
+    bpy.ops.object.select_all(action="DESELECT")
+    block.select_set(True)
+    bpy.context.view_layer.objects.active = block
+    bpy.ops.quartermaster.execute_cut()
+
+    check("QM_FingerBlock_L" in bpy.data.objects, "left half created")
+    check("QM_FingerBlock_R" in bpy.data.objects, "right half created")
+    left = bpy.data.objects["QM_FingerBlock_L"]
+    # Picker for thickness=4, seam=400 -> FINGER pitch=12 depth=6.4
+    # n_fingers = 400/12 = 33; outer-corner X = +6.4
+    l_xs_at_outer = sorted({
+        round((left.matrix_world @ v.co).y, 1)
+        for v in left.data.vertices
+        if abs((left.matrix_world @ v.co).x - 6.4) < 0.5
+    })
+    print(f"  finger-outer Y values (should be many, alternating): {len(l_xs_at_outer)} unique")
+    check(len(l_xs_at_outer) >= 20, f"many fingers visible (>= 20 outer Y-values, got {len(l_xs_at_outer)})")
+
+
+def test_snap_to_longest_axis():
+    print("\n[11] Snap to longest axis")
+    cleanup()
+    # 300x100x4 — longest axis is X
+    from quartermaster.blender.fixtures import create_test_block
+    block = create_test_block(name="QM_SnapBlock", size=(300.0, 100.0, 4.0), location=(50.0, 30.0, 0.0))
+    bpy.ops.quartermaster.add_cut_plane()
+    bpy.ops.object.select_all(action="DESELECT")
+    block.select_set(True)
+    bpy.context.view_layer.objects.active = block
+
+    bpy.ops.quartermaster.snap_cut_plane()
+    plane = bpy.data.objects["QM_CutPlane"]
+    bpy.context.view_layer.update()
+
+    # The plane should be at the block's center
+    check(abs(plane.location.x - 50) < 0.01, f"plane.x = block center.x = 50 (got {plane.location.x:.2f})")
+    check(abs(plane.location.y - 30) < 0.01, f"plane.y = block center.y = 30 (got {plane.location.y:.2f})")
+
+    # Plane's local +Z should point along world +X (the longest axis)
+    z_world = plane.matrix_world.to_3x3() @ Vector((0, 0, 1))
+    check(abs(z_world.x - 1.0) < 0.01, f"plane local +Z aligned with world +X (got x={z_world.x:.3f})")
+    check(abs(z_world.y) < 0.01,       f"plane local +Z has no Y component (got y={z_world.y:.3f})")
+    check(abs(z_world.z) < 0.01,       f"plane local +Z has no Z component (got z={z_world.z:.3f})")
+
+
+def test_dovetail_via_panel_override():
+    """The Joint dropdown should produce the same result as override_spec=..."""
+    print("\n[12] Joint override via panel property")
+    cleanup()
+    bpy.ops.quartermaster.add_test_block()
+    bpy.ops.quartermaster.add_cut_plane()
+    empty = bpy.data.objects["QM_CutPlane"]
+    empty.rotation_mode = "XYZ"
+    empty.rotation_euler = (0.0, math.pi / 2, 0.0)
+    bpy.context.view_layer.update()
+
+    bpy.context.scene.qm_joint_override = "DOVETAIL"
+    bpy.context.scene.qm_tail_count = 3
+    bpy.context.scene.qm_dovetail_angle = 10.0
+    bpy.context.scene.qm_table_mm = 0.0
+
+    block = bpy.data.objects["QM_TestBlock"]
+    bpy.ops.object.select_all(action="DESELECT")
+    block.select_set(True)
+    bpy.context.view_layer.objects.active = block
+    bpy.ops.quartermaster.execute_cut()
+
+    left = bpy.data.objects["QM_TestBlock_L"]
+    # 3 tails with default base_width=4*4=16, gap = (200 - 48)/4 = 38
+    # tail outer corners at x=8 (protrusion) — count distinct Y values
+    outer_ys = sorted({
+        round((left.matrix_world @ v.co).y, 1)
+        for v in left.data.vertices
+        if abs((left.matrix_world @ v.co).x - 8) < 0.5
+    })
+    print(f"  outer-corner Ys: {outer_ys}")
+    # 3 tails -> 6 outer corner Y positions (each tail has 2)
+    check(len(outer_ys) >= 6, f"3 tails -> >= 6 outer-corner Ys (got {len(outer_ys)}: {outer_ys})")
+
+    # Reset for subsequent tests
+    bpy.context.scene.qm_joint_override = "AUTO"
+    bpy.context.scene.qm_tail_count = 1
+
+
+def test_multi_object_union():
+    print("\n[13] Multi-object union before cut")
+    cleanup()
+    # Plate + flange extension (both 4mm thick, in-plane only). Vertical
+    # asymmetric assemblies (e.g., plate + tall boss) are not yet supported
+    # cleanly by the joint cutter — see TODO in cut.py. This test verifies
+    # the UNION step itself: extras are baked into the cut input so the right
+    # half includes geometry from the flange that wasn't part of the plate.
+    from quartermaster.blender.fixtures import create_test_block
+    plate  = create_test_block(name="QM_UnionPlate",  size=(300.0, 200.0, 4.0), location=(0.0, 0.0, 0.0))
+    flange = create_test_block(name="QM_UnionFlange", size=( 40.0,  40.0, 4.0), location=(170.0, 0.0, 0.0))
+
+    bpy.ops.quartermaster.add_cut_plane()
+    empty = bpy.data.objects["QM_CutPlane"]
+    empty.rotation_mode = "XYZ"
+    empty.rotation_euler = (0.0, math.pi / 2, 0.0)
+    bpy.context.view_layer.update()
+
+    # Both 4mm — picker would say SCARF; pin the joint so the test is deterministic
+    bpy.context.scene.qm_joint_override = "DOVETAIL"
+    bpy.context.scene.qm_tail_count = 1
+    bpy.context.scene.qm_dovetail_angle = 10.0
+    bpy.context.scene.qm_table_mm = 0.0
+
+    bpy.ops.object.select_all(action="DESELECT")
+    flange.select_set(True)
+    plate.select_set(True)
+    bpy.context.view_layer.objects.active = plate
+    bpy.ops.quartermaster.execute_cut()
+
+    check("QM_UnionPlate_L" in bpy.data.objects, "left half created")
+    check("QM_UnionPlate_R" in bpy.data.objects, "right half created")
+    right = bpy.data.objects["QM_UnionPlate_R"]
+    x_max = max((right.matrix_world @ v.co).x for v in right.data.vertices)
+    # Plate alone ends at x=+150; the flange extends to x=+190. If the union
+    # actually fed into the cut, the right half's bbox X-max will be ~190.
+    check(x_max > 180, f"right half includes the flange past plate end (got x_max={x_max:.2f}, want > 180)")
+
+
+def _reset_scene_props():
+    """Restore panel state to defaults so tests don't leak settings into each other."""
+    bpy.context.scene.qm_joint_override = "AUTO"
+    bpy.context.scene.qm_tail_count     = 1
+    bpy.context.scene.qm_dovetail_angle = 10.0
+    bpy.context.scene.qm_table_mm       = 0.0
+
+
 def main():
-    test_add_test_block()
-    test_add_cut_plane()
-    test_picker_unit_agrees_with_runtime()
-    test_smooth_scarf_cut()
-    test_tabled_scarf_cut()
-    test_idempotent_recut()
-    test_dovetail_cut()
-    test_active_half_redirects_to_source()
-    test_multi_tail_dovetail_via_override()
+    tests = [
+        test_add_test_block,
+        test_add_cut_plane,
+        test_picker_unit_agrees_with_runtime,
+        test_smooth_scarf_cut,
+        test_tabled_scarf_cut,
+        test_idempotent_recut,
+        test_dovetail_cut,
+        test_active_half_redirects_to_source,
+        test_multi_tail_dovetail_via_override,
+        test_finger_cut_via_picker,
+        test_snap_to_longest_axis,
+        test_dovetail_via_panel_override,
+        test_multi_object_union,
+    ]
+    for t in tests:
+        _reset_scene_props()
+        try:
+            t()
+        except Exception as exc:
+            failures.append(f"{t.__name__}: raised {type(exc).__name__}: {exc}")
+            print(f"  FAIL (raised) {exc}")
 
     print("\n" + "=" * 50)
     if failures:

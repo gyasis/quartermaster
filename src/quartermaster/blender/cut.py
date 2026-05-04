@@ -20,20 +20,22 @@ class CutResult:
 def cut_along_plane(
     target_obj,
     plane_empty,
-    lockable:      bool = False,
+    table_mm:      float = 0.0,
     override_spec: "JointSpec | None" = None,
+    extra_meshes:  "list | None" = None,
 ) -> CutResult:
     """Bake `target_obj`'s modifier stack and split it into two halves using
-    the joint type chosen by `pick_joint`. Idempotent: removes prior
-    `<name>_L` / `_R` / `_baked` outputs.
+    the joint type chosen by `pick_joint` (or `override_spec` if provided).
+    Idempotent: removes prior `<name>_L` / `_R` / `_baked` outputs.
 
-    Dispatches on `spec.joint`:
-      - SCARF (smooth)   -> bisect plane + alignment pins
-      - SCARF (tabled)   -> cutter mesh extruded along seam axis (lockable=True)
-      - DOVETAIL         -> cutter mesh extruded along thickness axis
-
-    `lockable=True` upgrades the smooth scarf to a tabled (locked) variant.
-    Has no effect on dovetail (which already provides mechanical lock).
+    Args:
+      table_mm: > 0 upgrades a smooth scarf to a tabled (locked) variant; the
+                value is the table width in mm. Has no effect on other joints.
+      override_spec: bypass the picker entirely with a JointSpec the caller
+                     constructed (e.g., to force tail_count > 1 dovetail).
+      extra_meshes: meshes to boolean-UNION with target_obj before cutting.
+                    Lets the operator handle assemblies (e.g., plate + bosses
+                    as separate objects) by treating them as one solid.
     """
     import bpy
     from mathutils import Vector
@@ -46,6 +48,14 @@ def cut_along_plane(
             bpy.data.objects.remove(old, do_unlink=True)
 
     baked = cuttable_copy(target_obj, name=f"{target_obj.name}_baked")
+    if extra_meshes:
+        for extra in extra_meshes:
+            mod = baked.modifiers.new(name="qm_union", type="BOOLEAN")
+            mod.object = extra
+            mod.operation = "UNION"
+            mod.solver = "EXACT"
+            bpy.context.view_layer.objects.active = baked
+            bpy.ops.object.modifier_apply(modifier=mod.name)
 
     corners = [baked.matrix_world @ Vector(c) for c in baked.bound_box]
     xs = [c.x for c in corners]; ys = [c.y for c in corners]; zs = [c.z for c in corners]
@@ -58,13 +68,12 @@ def cut_along_plane(
     else:
         spec = pick_joint(thickness=thickness, seam_length=seam_length)
 
-    if override_spec is None and lockable and spec.joint == JointType.SCARF:
-        table_mm = max(thickness * 2.0, 6.0)
+    if table_mm > 0 and spec.joint == JointType.SCARF:
         spec = JointSpec(
             joint=spec.joint,
             params={**spec.params, "table_mm": table_mm},
             pin_count=0,
-            rationale=spec.rationale + " | tabled lock",
+            rationale=spec.rationale + f" | table {table_mm:.1f}mm",
         )
 
     if spec.joint == JointType.SCARF:
@@ -81,7 +90,13 @@ def cut_along_plane(
             for i, p in enumerate(pins):
                 _drill_pin(p, left, right, i)
     elif spec.joint == JointType.DOVETAIL:
-        left, right = _cut_dovetail(baked, base_plane, spec, thickness, seam_length, target_obj.name)
+        from ..joints.dovetail import dovetail_path_2d
+        path = dovetail_path_2d(spec, thickness, seam_length)
+        left, right = _cut_with_path(baked, base_plane, path, thickness, seam_length, target_obj.name)
+    elif spec.joint == JointType.FINGER:
+        from ..joints.finger import finger_path_2d
+        path = finger_path_2d(spec, thickness, seam_length)
+        left, right = _cut_with_path(baked, base_plane, path, thickness, seam_length, target_obj.name)
     else:
         bpy.data.objects.remove(baked, do_unlink=True)
         raise NotImplementedError(
@@ -90,6 +105,9 @@ def cut_along_plane(
 
     target_obj.hide_set(True)
     baked.hide_set(True)
+    if extra_meshes:
+        for extra in extra_meshes:
+            extra.hide_set(True)
 
     return CutResult(
         left=left, right=right, spec=spec,
@@ -210,18 +228,51 @@ def _build_scarf_cutter(plate_obj, base_plane, spec, thickness, name):
     return obj
 
 
-def _cut_dovetail(baked, base_plane, spec, thickness, seam_length, target_name):
-    """Build a cutter solid from the dovetail path and boolean DIFFERENCE for
-    LEFT half (which gets the tail) and INTERSECT (with the plate) for RIGHT
-    (which gets the matching socket)."""
-    import bpy
-    cutter = _build_dovetail_cutter(
-        baked, base_plane, spec, thickness, seam_length, name="_qm_dovetail_cutter",
-    )
+def _cut_with_path(baked, base_plane, path, thickness, seam_length, target_name):
+    """Two-step path-based cut. Avoids non-convex cutter polygons (which
+    confuse the EXACT boolean solver on multi-feature input meshes) by:
 
-    def boolean_half(name, op):
-        obj = baked.copy()
-        obj.data = baked.data.copy()
+      1) Simple perpendicular cut with a big convex box covering +n half-space.
+      2) For each "indentation" in the path (subsequence with n' > 0), build a
+         convex prism for it and add to LEFT (UNION) / remove from RIGHT
+         (DIFFERENCE). Each indentation is the trapezoid (dovetail) or
+         rectangle (finger) of one tail/finger feature.
+
+    Both steps use only convex shapes for booleans, which the solver handles
+    reliably even on unioned multi-object inputs.
+    """
+    import bpy
+    from mathutils import Vector
+
+    n_axis = Vector(base_plane.normal).normalized()
+    s_axis = Vector(base_plane.seam_axis).normalized()
+    t_axis = n_axis.cross(s_axis).normalized()
+    p0     = Vector(base_plane.point)
+
+    corners       = [baked.matrix_world @ Vector(c) for c in baked.bound_box]
+    pad           = 1.0
+    n_max         = max((c - p0).dot(n_axis) for c in corners) + pad
+    # Padded t-range for the cutting big-box (boolean robustness)
+    t_min_padded  = min((c - p0).dot(t_axis) for c in corners) - pad
+    t_max_padded  = max((c - p0).dot(t_axis) for c in corners) + pad
+    # Unpadded t-range for the tail UNION step — UNION must not extend the
+    # part past its actual surfaces.
+    t_min_exact   = min((c - p0).dot(t_axis) for c in corners)
+    t_max_exact   = max((c - p0).dot(t_axis) for c in corners)
+    half_seam_pad = seam_length / 2 + pad
+
+    # Step 1: perpendicular cut
+    big_box_polygon = [
+        (0.0,    -half_seam_pad),
+        (n_max,  -half_seam_pad),
+        (n_max,  +half_seam_pad),
+        (0.0,    +half_seam_pad),
+    ]
+    big_box = _make_prism(big_box_polygon, base_plane, (t_min_padded, t_max_padded), name="_qm_big_box")
+
+    def boolean_split(target, cutter, name, op):
+        obj = target.copy()
+        obj.data = target.data.copy()
         obj.name = name
         bpy.context.collection.objects.link(obj)
         mod = obj.modifiers.new(name="qm_cut", type="BOOLEAN")
@@ -232,51 +283,71 @@ def _cut_dovetail(baked, base_plane, spec, thickness, seam_length, target_name):
         bpy.ops.object.modifier_apply(modifier=mod.name)
         return obj
 
-    left  = boolean_half(target_name + "_L", "DIFFERENCE")
-    right = boolean_half(target_name + "_R", "INTERSECT")
-    bpy.data.objects.remove(cutter, do_unlink=True)
+    left  = boolean_split(baked, big_box, target_name + "_L", "DIFFERENCE")
+    right = boolean_split(baked, big_box, target_name + "_R", "INTERSECT")
+    bpy.data.objects.remove(big_box, do_unlink=True)
+
+    # Step 2: for each indentation (tail/finger), add to LEFT and subtract from RIGHT
+    for idx, indent_polygon in enumerate(_path_indentations(path)):
+        tail = _make_prism(indent_polygon, base_plane, (t_min_exact, t_max_exact), name=f"_qm_indent_{idx}")
+        for half, op in [(left, "UNION"), (right, "DIFFERENCE")]:
+            mod = half.modifiers.new(name=f"qm_indent_{idx}", type="BOOLEAN")
+            mod.object = tail
+            mod.operation = op
+            mod.solver = "EXACT"
+            bpy.context.view_layer.objects.active = half
+            bpy.ops.object.modifier_apply(modifier=mod.name)
+        bpy.data.objects.remove(tail, do_unlink=True)
+
     return left, right
 
 
-def _build_dovetail_cutter(plate_obj, base_plane, spec, thickness, seam_length, name):
-    """3D cutter for dovetails: 2D path in (n', s'), extruded along thickness.
+def _path_indentations(path):
+    """Yield convex polygons for each path subsequence with n' > 0.
 
-    Different extrusion axis from tabled scarf — scarf path lives in the
-    (normal, thickness) plane and extrudes along seam; dovetail path lives in
-    the (normal, seam) plane and extrudes along thickness.
+    For a dovetail/finger path that runs from (0, -seam/2) to (0, +seam/2)
+    with N tails, this yields N polygons — each is the tail's outline
+    (anchor_before, ...bulge_points..., anchor_after) where anchor_* are the
+    n=0 points immediately bracketing the bulge.
     """
+    out = []
+    i = 0
+    n = len(path)
+    while i < n:
+        if path[i][0] > 0:
+            start = i
+            while i < n and path[i][0] > 0:
+                i += 1
+            before = path[start - 1] if start > 0       else (0.0, path[start][1])
+            after  = path[i]         if i < n           else (0.0, path[i - 1][1])
+            out.append([before, *path[start:i], after])
+        else:
+            i += 1
+    return out
+
+
+def _make_prism(polygon_2d, base_plane, t_range, name):
+    """Extrude a 2D (n', s') polygon along the thickness axis between
+    t_range = (t_min, t_max) to a 3D solid. Polygon must be simple (no
+    self-intersections); convexity is recommended for boolean robustness."""
     import bpy, bmesh
     from mathutils import Vector
-    from ..joints.dovetail import dovetail_path_2d
-
-    path = dovetail_path_2d(spec, thickness, seam_length)
-    half_t    = thickness / 2
-    half_seam = seam_length / 2
-    pad_n = pad_t = 1.0
 
     n_axis = Vector(base_plane.normal).normalized()
     s_axis = Vector(base_plane.seam_axis).normalized()
     t_axis = n_axis.cross(s_axis).normalized()
     p0     = Vector(base_plane.point)
-
-    corners   = [plate_obj.matrix_world @ Vector(c) for c in plate_obj.bound_box]
-    n_max     = max((c - p0).dot(n_axis) for c in corners) + pad_n
-
-    polygon = list(path) + [
-        (n_max, +half_seam),
-        (n_max, -half_seam),
-    ]
+    t_min, t_max = t_range
 
     bm = bmesh.new()
     front_verts, back_verts = [], []
-    for (np_, sp_) in polygon:
-        front_verts.append(bm.verts.new(p0 + n_axis * np_ + s_axis * sp_ + t_axis * (-half_t - pad_t)))
-        back_verts.append(bm.verts.new(p0 + n_axis * np_ + s_axis * sp_ + t_axis * (+half_t + pad_t)))
+    for (np_, sp_) in polygon_2d:
+        front_verts.append(bm.verts.new(p0 + n_axis * np_ + s_axis * sp_ + t_axis * t_min))
+        back_verts.append(bm.verts.new(p0 + n_axis * np_ + s_axis * sp_ + t_axis * t_max))
     bm.verts.ensure_lookup_table()
-
     bm.faces.new(front_verts[::-1])
     bm.faces.new(back_verts)
-    n = len(polygon)
+    n = len(polygon_2d)
     for i in range(n):
         j = (i + 1) % n
         bm.faces.new([front_verts[i], back_verts[i], back_verts[j], front_verts[j]])

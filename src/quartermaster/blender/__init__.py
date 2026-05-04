@@ -34,15 +34,44 @@ __all__ = [
 ]
 
 
+_SCENE_PROPS = (
+    "qm_joint_override",
+    "qm_tail_count",
+    "qm_dovetail_angle",
+    "qm_table_mm",
+    # Older boolean kept for migration only — drop after a release
+    "qm_use_table_lock",
+)
+
+
 def register():
     """Install operators + N-panel into the running Blender session."""
     import bpy
     from . import operators, panel
 
-    bpy.types.Scene.qm_use_table_lock = bpy.props.BoolProperty(
-        name="Locked (tabled) joint",
-        description="Add a perpendicular step at mid-thickness for grip + alignment",
-        default=False,
+    bpy.types.Scene.qm_joint_override = bpy.props.EnumProperty(
+        name="Joint",
+        description="Force a joint type, or AUTO to use the picker",
+        items=[
+            ("AUTO",     "Auto (picker)", "Use the picker's automatic choice"),
+            ("DOVETAIL", "Dovetail",      "Force a dovetail (trapezoidal flare)"),
+        ],
+        default="AUTO",
+    )
+    bpy.types.Scene.qm_tail_count = bpy.props.IntProperty(
+        name="Tails",
+        description="Number of dovetail tails along the seam (only used when Joint = Dovetail)",
+        default=1, min=1, max=10,
+    )
+    bpy.types.Scene.qm_dovetail_angle = bpy.props.FloatProperty(
+        name="Dovetail angle (deg)",
+        description="Flare angle of the tail; 7-10 deg is the FDM sweet spot",
+        default=10.0, min=2.0, max=20.0,
+    )
+    bpy.types.Scene.qm_table_mm = bpy.props.FloatProperty(
+        name="Lock step (mm)",
+        description="Tabled scarf step width at mid-thickness (0 = smooth scarf, no mechanical lock)",
+        default=0.0, min=0.0, max=50.0, soft_max=20.0, subtype="DISTANCE",
     )
 
     for cls in (*operators.CLASSES, *panel.CLASSES):
@@ -63,5 +92,6 @@ def unregister():
         except (RuntimeError, ValueError):
             pass
 
-    if hasattr(bpy.types.Scene, "qm_use_table_lock"):
-        del bpy.types.Scene.qm_use_table_lock
+    for prop in _SCENE_PROPS:
+        if hasattr(bpy.types.Scene, prop):
+            delattr(bpy.types.Scene, prop)
