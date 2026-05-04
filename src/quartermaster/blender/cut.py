@@ -17,16 +17,20 @@ class CutResult:
     seam_length: float
 
 
-def cut_with_scarf(target_obj, plane_empty, lockable: bool = False) -> CutResult:
-    """Bake `target_obj`'s modifier stack and split it into two halves with a
-    scarf joint. Idempotent: removes prior `<name>_L` / `_R` / `_baked` outputs.
+def cut_along_plane(target_obj, plane_empty, lockable: bool = False) -> CutResult:
+    """Bake `target_obj`'s modifier stack and split it into two halves using
+    the joint type chosen by `pick_joint`. Idempotent: removes prior
+    `<name>_L` / `_R` / `_baked` outputs.
 
-    `lockable=True` upgrades the smooth scarf to a tabled (locked) scarf — a
-    perpendicular step at mid-thickness that mechanically locks against
-    in-plane pull and self-registers during glue-up. Pins are skipped in that
-    case because the table provides alignment.
+    Dispatches on `spec.joint`:
+      - SCARF (smooth)   -> bisect plane + alignment pins
+      - SCARF (tabled)   -> cutter mesh extruded along seam axis (lockable=True)
+      - DOVETAIL         -> cutter mesh extruded along thickness axis
+
+    `lockable=True` upgrades the smooth scarf to a tabled (locked) variant.
+    Has no effect on dovetail (which already provides mechanical lock).
     """
-    import bpy, bmesh
+    import bpy
     from mathutils import Vector
 
     base_plane = cut_plane_from_empty(plane_empty)
@@ -47,28 +51,34 @@ def cut_with_scarf(target_obj, plane_empty, lockable: bool = False) -> CutResult
     spec = pick_joint(thickness=thickness, seam_length=seam_length)
 
     if lockable and spec.joint == JointType.SCARF:
-        # Default table size: scales with stock, with a ~6mm minimum for FDM printability.
         table_mm = max(thickness * 2.0, 6.0)
         spec = JointSpec(
             joint=spec.joint,
             params={**spec.params, "table_mm": table_mm},
-            pin_count=0,  # the table replaces alignment pins
+            pin_count=0,
             rationale=spec.rationale + " | tabled lock",
         )
 
-    if spec.params.get("table_mm", 0) > 0:
-        left, right = _cut_tabled_scarf(baked, base_plane, spec, thickness, target_obj.name)
-        pins = []
+    if spec.joint == JointType.SCARF:
+        if spec.params.get("table_mm", 0) > 0:
+            left, right = _cut_tabled_scarf(baked, base_plane, spec, thickness, target_obj.name)
+        else:
+            left, right = _cut_smooth_scarf(baked, base_plane, spec, thickness, bbox_min, target_obj.name)
+            pins = pin_locations(
+                base_plane, spec,
+                seam_origin=(base_plane.point[0], bbox_min[1], base_plane.point[2]),
+                seam_length=seam_length,
+                thickness=thickness,
+            )
+            for i, p in enumerate(pins):
+                _drill_pin(p, left, right, i)
+    elif spec.joint == JointType.DOVETAIL:
+        left, right = _cut_dovetail(baked, base_plane, spec, thickness, seam_length, target_obj.name)
     else:
-        left, right = _cut_smooth_scarf(baked, base_plane, spec, thickness, bbox_min, target_obj.name)
-        pins = pin_locations(
-            base_plane, spec,
-            seam_origin=(base_plane.point[0], bbox_min[1], base_plane.point[2]),
-            seam_length=seam_length,
-            thickness=thickness,
+        bpy.data.objects.remove(baked, do_unlink=True)
+        raise NotImplementedError(
+            f"Joint {spec.joint.value} not yet supported in the Blender pipeline"
         )
-        for i, p in enumerate(pins):
-            _drill_pin(p, left, right, i)
 
     target_obj.hide_set(True)
     baked.hide_set(True)
@@ -77,6 +87,10 @@ def cut_with_scarf(target_obj, plane_empty, lockable: bool = False) -> CutResult
         left=left, right=right, spec=spec,
         thickness=thickness, seam_length=seam_length,
     )
+
+
+# Backwards-compat alias from before the dispatcher refactor.
+cut_with_scarf = cut_along_plane
 
 
 def _cut_smooth_scarf(baked, base_plane, spec, thickness, bbox_min, target_name):
@@ -175,6 +189,86 @@ def _build_scarf_cutter(plate_obj, base_plane, spec, thickness, name):
     bm.faces.new(front_verts[::-1])  # front cap (-seam side)
     bm.faces.new(back_verts)         # back cap (+seam side)
     n = len(profile)
+    for i in range(n):
+        j = (i + 1) % n
+        bm.faces.new([front_verts[i], back_verts[i], back_verts[j], front_verts[j]])
+    bmesh.ops.recalc_face_normals(bm, faces=bm.faces)
+
+    mesh = bpy.data.meshes.new(f"{name}_mesh")
+    bm.to_mesh(mesh)
+    bm.free()
+    obj = bpy.data.objects.new(name, mesh)
+    bpy.context.collection.objects.link(obj)
+    return obj
+
+
+def _cut_dovetail(baked, base_plane, spec, thickness, seam_length, target_name):
+    """Build a cutter solid from the dovetail path and boolean DIFFERENCE for
+    LEFT half (which gets the tail) and INTERSECT (with the plate) for RIGHT
+    (which gets the matching socket)."""
+    import bpy
+    cutter = _build_dovetail_cutter(
+        baked, base_plane, spec, thickness, seam_length, name="_qm_dovetail_cutter",
+    )
+
+    def boolean_half(name, op):
+        obj = baked.copy()
+        obj.data = baked.data.copy()
+        obj.name = name
+        bpy.context.collection.objects.link(obj)
+        mod = obj.modifiers.new(name="qm_cut", type="BOOLEAN")
+        mod.object = cutter
+        mod.operation = op
+        mod.solver = "EXACT"
+        bpy.context.view_layer.objects.active = obj
+        bpy.ops.object.modifier_apply(modifier=mod.name)
+        return obj
+
+    left  = boolean_half(target_name + "_L", "DIFFERENCE")
+    right = boolean_half(target_name + "_R", "INTERSECT")
+    bpy.data.objects.remove(cutter, do_unlink=True)
+    return left, right
+
+
+def _build_dovetail_cutter(plate_obj, base_plane, spec, thickness, seam_length, name):
+    """3D cutter for dovetails: 2D path in (n', s'), extruded along thickness.
+
+    Different extrusion axis from tabled scarf — scarf path lives in the
+    (normal, thickness) plane and extrudes along seam; dovetail path lives in
+    the (normal, seam) plane and extrudes along thickness.
+    """
+    import bpy, bmesh
+    from mathutils import Vector
+    from ..joints.dovetail import dovetail_path_2d
+
+    path = dovetail_path_2d(spec, thickness, seam_length)
+    half_t    = thickness / 2
+    half_seam = seam_length / 2
+    pad_n = pad_t = 1.0
+
+    n_axis = Vector(base_plane.normal).normalized()
+    s_axis = Vector(base_plane.seam_axis).normalized()
+    t_axis = n_axis.cross(s_axis).normalized()
+    p0     = Vector(base_plane.point)
+
+    corners   = [plate_obj.matrix_world @ Vector(c) for c in plate_obj.bound_box]
+    n_max     = max((c - p0).dot(n_axis) for c in corners) + pad_n
+
+    polygon = list(path) + [
+        (n_max, +half_seam),
+        (n_max, -half_seam),
+    ]
+
+    bm = bmesh.new()
+    front_verts, back_verts = [], []
+    for (np_, sp_) in polygon:
+        front_verts.append(bm.verts.new(p0 + n_axis * np_ + s_axis * sp_ + t_axis * (-half_t - pad_t)))
+        back_verts.append(bm.verts.new(p0 + n_axis * np_ + s_axis * sp_ + t_axis * (+half_t + pad_t)))
+    bm.verts.ensure_lookup_table()
+
+    bm.faces.new(front_verts[::-1])
+    bm.faces.new(back_verts)
+    n = len(polygon)
     for i in range(n):
         j = (i + 1) % n
         bm.faces.new([front_verts[i], back_verts[i], back_verts[j], front_verts[j]])

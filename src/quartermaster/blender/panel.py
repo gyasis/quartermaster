@@ -19,10 +19,11 @@ class QM_PT_Panel(bpy.types.Panel):
     def draw(self, context):
         layout = self.layout
 
-        # Quick start — clean fixture for the smoke test
+        # Quick start — clean fixtures for the smoke test
         box = layout.box()
-        box.label(text="Quick start (smoke test)", icon="MESH_CUBE")
-        box.operator("quartermaster.add_test_block", text="Add Test Block (300x200x4)")
+        box.label(text="Quick start (test fixtures)", icon="MESH_CUBE")
+        box.operator("quartermaster.add_test_block",     text="Add Test Block (300x200x4 -> scarf)")
+        box.operator("quartermaster.add_dovetail_block", text="Add Dovetail Block (80x60x6 -> dovetail)")
 
         layout.separator()
         col = layout.column(align=True)

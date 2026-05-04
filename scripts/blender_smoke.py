@@ -201,6 +201,72 @@ def test_idempotent_recut():
 
 # --- run ---------------------------------------------------------------------
 
+def test_dovetail_cut():
+    print("\n[7] Dovetail cut on dovetail block")
+    cleanup()
+    bpy.ops.quartermaster.add_dovetail_block()
+    bpy.ops.quartermaster.add_cut_plane()
+    empty = bpy.data.objects["QM_CutPlane"]
+    empty.rotation_mode = "XYZ"
+    empty.rotation_euler = (0.0, math.pi / 2, 0.0)
+    bpy.context.view_layer.update()
+
+    bpy.context.scene.qm_use_table_lock = False
+    block = bpy.data.objects["QM_DovetailBlock"]
+    bpy.ops.object.select_all(action="DESELECT")
+    block.select_set(True)
+    bpy.context.view_layer.objects.active = block
+    bpy.ops.quartermaster.execute_cut()
+
+    check("QM_DovetailBlock_L" in bpy.data.objects, "left half created")
+    check("QM_DovetailBlock_R" in bpy.data.objects, "right half created")
+    left  = bpy.data.objects["QM_DovetailBlock_L"]
+    right = bpy.data.objects["QM_DovetailBlock_R"]
+
+    # 6mm thick, 60mm seam: picker -> DOVETAIL angle=10, tail=1
+    # protrusion = max(1.5*6, 8) = 9 mm
+    l_min, l_max = world_bbox_x(left)
+    r_min, r_max = world_bbox_x(right)
+    check(abs(l_min - (-40)) < 0.1, f"left X min ~ -40 plate edge (got {l_min:.2f})")
+    check(abs(l_max -    9) < 0.5, f"left X max ~ +9 (tail outer end) (got {l_max:.2f})")
+    check(abs(r_min -    0) < 0.5, f"right X min ~ 0 (cut line) (got {r_min:.2f})")
+    check(abs(r_max -   40) < 0.1, f"right X max ~ +40 plate edge (got {r_max:.2f})")
+
+    # Both halves are real solids
+    z_min, z_max = world_z_range(left)
+    check(abs(z_max - z_min - 6.0) < 0.01, f"left Z thickness ~ 6mm (got {z_max - z_min:.2f})")
+
+
+def test_active_half_redirects_to_source():
+    print("\n[8] Active-half redirect (regression check)")
+    cleanup()
+    bpy.ops.quartermaster.add_test_block()
+    bpy.ops.quartermaster.add_cut_plane()
+    empty = bpy.data.objects["QM_CutPlane"]
+    empty.rotation_mode = "XYZ"
+    empty.rotation_euler = (0.0, math.pi / 2, 0.0)
+    bpy.context.view_layer.update()
+
+    bpy.context.scene.qm_use_table_lock = False
+    block = bpy.data.objects["QM_TestBlock"]
+    bpy.ops.object.select_all(action="DESELECT")
+    block.select_set(True)
+    bpy.context.view_layer.objects.active = block
+    bpy.ops.quartermaster.execute_cut()
+
+    # Now activate the LEFT half (the kind of thing a user does after a cut)
+    # and re-cut. The operator should redirect to the source, NOT cascade.
+    left = bpy.data.objects["QM_TestBlock_L"]
+    bpy.ops.object.select_all(action="DESELECT")
+    left.select_set(True)
+    bpy.context.view_layer.objects.active = left
+    bpy.ops.quartermaster.execute_cut()
+
+    check("QM_TestBlock_L_L" not in bpy.data.objects, "no cascade — QM_TestBlock_L_L not created")
+    check("QM_TestBlock_L_R" not in bpy.data.objects, "no cascade — QM_TestBlock_L_R not created")
+    check("QM_TestBlock_L"   in bpy.data.objects,    "fresh QM_TestBlock_L still exists (re-cut from source)")
+
+
 def main():
     test_add_test_block()
     test_add_cut_plane()
@@ -208,6 +274,8 @@ def main():
     test_smooth_scarf_cut()
     test_tabled_scarf_cut()
     test_idempotent_recut()
+    test_dovetail_cut()
+    test_active_half_redirects_to_source()
 
     print("\n" + "=" * 50)
     if failures:

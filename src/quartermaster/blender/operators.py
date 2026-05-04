@@ -3,7 +3,7 @@ from __future__ import annotations
 import bpy
 
 from .adapter import add_cut_plane_helper, QM_CUT_PLANE_PROP
-from .cut import cut_with_scarf
+from .cut import cut_along_plane
 from .fixtures import create_test_block
 
 
@@ -74,8 +74,24 @@ class QM_OT_ExecuteCut(bpy.types.Operator):
         if plane is None:
             self.report({"ERROR"}, "No QM_CutPlane in scene — click 'Add Cut Plane' first")
             return {"CANCELLED"}
+
+        # If the user accidentally re-activated a previous output (a half or
+        # the baked intermediate), redirect to the original source so we don't
+        # cascade-cut. Common after running cut, then immediately running it
+        # again without selecting the source.
+        for suffix in ("_L", "_R", "_baked"):
+            if target.name.endswith(suffix):
+                source_name = target.name[: -len(suffix)]
+                source = bpy.data.objects.get(source_name)
+                if source and source.type == "MESH":
+                    self.report(
+                        {"INFO"},
+                        f"Redirecting from derivative {target.name} to source {source.name}",
+                    )
+                    target = source
+                    break
         try:
-            result = cut_with_scarf(
+            result = cut_along_plane(
                 target, plane,
                 lockable=getattr(context.scene, "qm_use_table_lock", False),
             )
@@ -110,4 +126,22 @@ class QM_OT_AddTestBlock(bpy.types.Operator):
         return {"FINISHED"}
 
 
-CLASSES = (QM_OT_AddTestBlock, QM_OT_AddCutPlane, QM_OT_ExecuteCut)
+class QM_OT_AddDovetailBlock(bpy.types.Operator):
+    """Drop a clean 80x60x6mm cuboid — picker target for this block is DOVETAIL (single tail)."""
+    bl_idname = "quartermaster.add_dovetail_block"
+    bl_label = "Add Dovetail Block"
+    bl_options = {"REGISTER", "UNDO"}
+
+    def execute(self, context):
+        block = create_test_block(name="QM_DovetailBlock", size=(80.0, 60.0, 6.0), location=(0.0, 0.0, 0.0))
+        bpy.ops.object.select_all(action="DESELECT")
+        block.select_set(True)
+        context.view_layer.objects.active = block
+        self.report(
+            {"INFO"},
+            f"Added {block.name} (80x60x6mm) — picker target: dovetail, single tail",
+        )
+        return {"FINISHED"}
+
+
+CLASSES = (QM_OT_AddTestBlock, QM_OT_AddDovetailBlock, QM_OT_AddCutPlane, QM_OT_ExecuteCut)
