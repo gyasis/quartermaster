@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+*.egg
+.pytest_cache/
+.venv/
+venv/
+.python-version
+*.cover
+.coverage
+htmlcov/
+
+# uv
+uv.lock
+
+# Build
+dist/
+build/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Blender
+*.blend1
+*.blend2
+*.blend@
