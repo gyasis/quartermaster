@@ -470,6 +470,52 @@ def _reset_scene_props():
     bpy.context.scene.qm_tail_count     = 1
     bpy.context.scene.qm_dovetail_angle = 10.0
     bpy.context.scene.qm_table_mm       = 0.0
+    bpy.context.scene.qm_tolerance_mm   = 0.0
+
+
+def test_tolerance_expands_socket():
+    """Tolerance expands the socket prism in (n', s'); the tail prism stays
+    original size. Look at the socket's INNER far edge position on the right
+    half — without tolerance it's at n'=protrusion=9; with tolerance=0.5 it
+    moves to n'=9.5 (the socket is bigger so the printed pieces have clearance).
+    """
+    print("\n[14] FDM tolerance: socket bigger than tail")
+    cleanup()
+    bpy.ops.quartermaster.add_dovetail_block()  # 80x60x6, single dovetail, protrusion=9
+    bpy.ops.quartermaster.add_cut_plane()
+    empty = bpy.data.objects["QM_CutPlane"]
+    empty.rotation_mode = "XYZ"
+    empty.rotation_euler = (0.0, math.pi / 2, 0.0)
+    bpy.context.view_layer.update()
+
+    # Baseline: tolerance=0 → socket inner edge at x=9
+    bpy.context.scene.qm_tolerance_mm = 0.0
+    bpy.context.scene.qm_joint_override = "AUTO"
+    block = bpy.data.objects["QM_DovetailBlock"]
+    bpy.ops.object.select_all(action="DESELECT")
+    block.select_set(True)
+    bpy.context.view_layer.objects.active = block
+    bpy.ops.quartermaster.execute_cut()
+    right_tight = bpy.data.objects["QM_DovetailBlock_R"]
+    xs_tight = sorted({round((right_tight.matrix_world @ v.co).x, 2) for v in right_tight.data.vertices})
+    check(9.0 in xs_tight, f"baseline: right has socket inner edge at x=9.0 (got xs={xs_tight})")
+
+    # Tolerance=0.5: socket inner edge moves to x=9.5
+    bpy.context.scene.qm_tolerance_mm = 0.5
+    block.hide_set(False)
+    bpy.ops.object.select_all(action="DESELECT")
+    block.select_set(True)
+    bpy.context.view_layer.objects.active = block
+    bpy.ops.quartermaster.execute_cut()
+    right_loose = bpy.data.objects["QM_DovetailBlock_R"]
+    xs_loose = sorted({round((right_loose.matrix_world @ v.co).x, 2) for v in right_loose.data.vertices})
+    check(9.5 in xs_loose, f"with tolerance: right has socket inner edge at x=9.5 (got xs={xs_loose})")
+    check(9.0 not in xs_loose, "socket inner edge moved (no x=9.0 anymore)")
+
+    # Tail UNCHANGED — left's tail still extends to x=9.0
+    left_loose = bpy.data.objects["QM_DovetailBlock_L"]
+    l_max = max((left_loose.matrix_world @ v.co).x for v in left_loose.data.vertices)
+    check(abs(l_max - 9.0) < 0.05, f"tail outer end unchanged (got {l_max:.3f}, want 9.0)")
 
 
 def main():
@@ -487,6 +533,7 @@ def main():
         test_snap_to_longest_axis,
         test_dovetail_via_panel_override,
         test_multi_object_union,
+        test_tolerance_expands_socket,
     ]
     for t in tests:
         _reset_scene_props()

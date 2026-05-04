@@ -21,6 +21,7 @@ def cut_along_plane(
     target_obj,
     plane_empty,
     table_mm:      float = 0.0,
+    tolerance_mm:  float = 0.0,
     override_spec: "JointSpec | None" = None,
     extra_meshes:  "list | None" = None,
 ) -> CutResult:
@@ -92,11 +93,11 @@ def cut_along_plane(
     elif spec.joint == JointType.DOVETAIL:
         from ..joints.dovetail import dovetail_path_2d
         path = dovetail_path_2d(spec, thickness, seam_length)
-        left, right = _cut_with_path(baked, base_plane, path, thickness, seam_length, target_obj.name)
+        left, right = _cut_with_path(baked, base_plane, path, thickness, seam_length, target_obj.name, tolerance_mm)
     elif spec.joint == JointType.FINGER:
         from ..joints.finger import finger_path_2d
         path = finger_path_2d(spec, thickness, seam_length)
-        left, right = _cut_with_path(baked, base_plane, path, thickness, seam_length, target_obj.name)
+        left, right = _cut_with_path(baked, base_plane, path, thickness, seam_length, target_obj.name, tolerance_mm)
     else:
         bpy.data.objects.remove(baked, do_unlink=True)
         raise NotImplementedError(
@@ -228,7 +229,7 @@ def _build_scarf_cutter(plate_obj, base_plane, spec, thickness, name):
     return obj
 
 
-def _cut_with_path(baked, base_plane, path, thickness, seam_length, target_name):
+def _cut_with_path(baked, base_plane, path, thickness, seam_length, target_name, tolerance_mm: float = 0.0):
     """Two-step path-based cut. Avoids non-convex cutter polygons (which
     confuse the EXACT boolean solver on multi-feature input meshes) by:
 
@@ -237,6 +238,10 @@ def _cut_with_path(baked, base_plane, path, thickness, seam_length, target_name)
          convex prism for it and add to LEFT (UNION) / remove from RIGHT
          (DIFFERENCE). Each indentation is the trapezoid (dovetail) or
          rectangle (finger) of one tail/finger feature.
+
+    `tolerance_mm` adds FDM clearance: the socket prism is expanded outward
+    by this amount so the printed pieces slot together with `tolerance_mm`
+    of clearance per side. Tail prism stays original size.
 
     Both steps use only convex shapes for booleans, which the solver handles
     reliably even on unioned multi-object inputs.
@@ -287,19 +292,78 @@ def _cut_with_path(baked, base_plane, path, thickness, seam_length, target_name)
     right = boolean_split(baked, big_box, target_name + "_R", "INTERSECT")
     bpy.data.objects.remove(big_box, do_unlink=True)
 
-    # Step 2: for each indentation (tail/finger), add to LEFT and subtract from RIGHT
+    # Step 2: for each indentation (tail/finger), add to LEFT and subtract
+    # from RIGHT. With tolerance_mm > 0, the socket prism (DIFFERENCE→RIGHT)
+    # is offset outward so the printed parts have clearance per side.
     for idx, indent_polygon in enumerate(_path_indentations(path)):
         tail = _make_prism(indent_polygon, base_plane, (t_min_exact, t_max_exact), name=f"_qm_indent_{idx}")
-        for half, op in [(left, "UNION"), (right, "DIFFERENCE")]:
+        if tolerance_mm > 0:
+            socket_polygon = _offset_polygon(indent_polygon, tolerance_mm)
+            socket = _make_prism(socket_polygon, base_plane, (t_min_exact, t_max_exact), name=f"_qm_socket_{idx}")
+        else:
+            socket = tail
+
+        for half, cutter, op in [(left, tail, "UNION"), (right, socket, "DIFFERENCE")]:
             mod = half.modifiers.new(name=f"qm_indent_{idx}", type="BOOLEAN")
-            mod.object = tail
+            mod.object = cutter
             mod.operation = op
             mod.solver = "EXACT"
             bpy.context.view_layer.objects.active = half
             bpy.ops.object.modifier_apply(modifier=mod.name)
+
         bpy.data.objects.remove(tail, do_unlink=True)
+        if socket is not tail:
+            bpy.data.objects.remove(socket, do_unlink=True)
 
     return left, right
+
+
+def _offset_polygon(polygon, distance):
+    """Move each edge of a CCW polygon outward by `distance` (Minkowski-style).
+
+    For a convex polygon, the result is the Minkowski sum with a disk of
+    radius `distance`. Each vertex of the offset polygon lies at the
+    intersection of its two adjacent offset edges; the formula moves the
+    vertex along its outward bisector by `distance / cos(half-angle)`.
+
+    Pure 2D math — testable without bpy. Polygon is given as a list of
+    (x, y) tuples; CCW orientation expected (interior on the left of each
+    edge).
+    """
+    import math
+
+    if distance == 0:
+        return list(polygon)
+    n = len(polygon)
+    if n < 3:
+        return list(polygon)
+
+    out = []
+    for i in range(n):
+        prev = polygon[(i - 1) % n]
+        curr = polygon[i]
+        nxt  = polygon[(i + 1) % n]
+
+        e1x, e1y = curr[0] - prev[0], curr[1] - prev[1]
+        e2x, e2y = nxt[0]  - curr[0], nxt[1]  - curr[1]
+        l1 = math.hypot(e1x, e1y) or 1.0
+        l2 = math.hypot(e2x, e2y) or 1.0
+        e1x, e1y = e1x / l1, e1y / l1
+        e2x, e2y = e2x / l2, e2y / l2
+
+        # Outward normals (rotate edge 90 CW for a CCW polygon)
+        n1x, n1y = e1y, -e1x
+        n2x, n2y = e2y, -e2x
+
+        bx, by = n1x + n2x, n1y + n2y
+        bl = math.hypot(bx, by) or 1.0
+        bx, by = bx / bl, by / bl
+
+        cos_half = n1x * bx + n1y * by
+        d_along  = distance / max(cos_half, 1e-6)
+
+        out.append((curr[0] + bx * d_along, curr[1] + by * d_along))
+    return out
 
 
 def _path_indentations(path):

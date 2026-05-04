@@ -205,6 +205,7 @@ class QM_OT_ExecuteCut(bpy.types.Operator):
             result = cut_along_plane(
                 target, plane,
                 table_mm=getattr(context.scene, "qm_table_mm", 0.0),
+                tolerance_mm=getattr(context.scene, "qm_tolerance_mm", 0.0),
                 override_spec=_build_override_spec(context.scene),
                 extra_meshes=extras or None,
             )

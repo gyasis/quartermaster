@@ -56,6 +56,8 @@ class QM_PT_Panel(bpy.types.Panel):
         sub2.enabled = not is_dovetail_override   # table only meaningful for scarf
         sub2.prop(scene, "qm_table_mm", slider=True)
 
+        col.prop(scene, "qm_tolerance_mm", slider=True)
+
         # --- 4. Cut ----------
         layout.separator()
         col = layout.column(align=True)

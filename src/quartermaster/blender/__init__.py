@@ -39,6 +39,7 @@ _SCENE_PROPS = (
     "qm_tail_count",
     "qm_dovetail_angle",
     "qm_table_mm",
+    "qm_tolerance_mm",
     # Older boolean kept for migration only — drop after a release
     "qm_use_table_lock",
 )
@@ -72,6 +73,11 @@ def register():
         name="Lock step (mm)",
         description="Tabled scarf step width at mid-thickness (0 = smooth scarf, no mechanical lock)",
         default=0.0, min=0.0, max=50.0, soft_max=20.0, subtype="DISTANCE",
+    )
+    bpy.types.Scene.qm_tolerance_mm = bpy.props.FloatProperty(
+        name="Print clearance (mm)",
+        description="Per-side clearance between tail and socket — needed for FDM (typical 0.1-0.2)",
+        default=0.15, min=0.0, max=2.0, soft_max=0.5, subtype="DISTANCE",
     )
 
     for cls in (*operators.CLASSES, *panel.CLASSES):
