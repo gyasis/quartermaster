@@ -603,6 +603,100 @@ def test_sliding_dovetail_via_picker():
         check(min(tenon_tip_zs) < -4.0, f"tenon flares wider in z at the tip (min z={min(tenon_tip_zs):.2f} < -4)")
 
 
+def test_half_lap_on_asymmetric_assembly():
+    """Half-lap's bbox-based cutter is the right choice on asymmetric inputs:
+    we WANT the cut to slice through the full thickness of any protrusion so
+    the boss ends up in RIGHT and not in LEFT. This test pins that behavior.
+    """
+    print("\n[A1] Half-lap on plate + tall boss")
+    cleanup()
+    from quartermaster.blender.fixtures import create_test_block
+    plate = create_test_block(name="QM_HLAsym",     size=(300.0, 200.0, 4.0),  location=(0.0, 0.0, 0.0))
+    boss  = create_test_block(name="QM_HLAsymBoss", size=( 40.0,  40.0, 12.0), location=(80.0, 0.0, 6.0))
+
+    bpy.context.view_layer.objects.active = plate
+    bpy.ops.quartermaster.add_cut_plane()
+    empty = bpy.data.objects["QM_CutPlane"]
+    empty.rotation_mode = "XYZ"
+    empty.rotation_euler = (0.0, math.pi / 2, 0.0)
+    empty.location = (0.0, 0.0, 0.0)
+    bpy.context.view_layer.update()
+
+    bpy.context.scene.qm_joint_override = "HALF_LAP"
+    bpy.context.scene.qm_overlap_mm = 10.0
+    bpy.context.scene.qm_table_mm = 0.0
+
+    bpy.ops.object.select_all(action="DESELECT")
+    boss.select_set(True)
+    plate.select_set(True)
+    bpy.context.view_layer.objects.active = plate
+    bpy.ops.quartermaster.execute_cut()
+
+    check("QM_HLAsym_L" in bpy.data.objects, "left half created")
+    check("QM_HLAsym_R" in bpy.data.objects, "right half created")
+    left, right = bpy.data.objects["QM_HLAsym_L"], bpy.data.objects["QM_HLAsym_R"]
+
+    # RIGHT should include the boss (full z=12)
+    r_z_max = max((right.matrix_world @ v.co).z for v in right.data.vertices)
+    check(r_z_max > 11, f"right contains boss (z_max={r_z_max:.2f})")
+
+    # LEFT should stay at plate thickness only (no boss material)
+    l_z_max = max((left.matrix_world @ v.co).z for v in left.data.vertices)
+    check(l_z_max <= 2.5, f"left stays within plate (z_max={l_z_max:.2f}, want ≤ 2.5)")
+
+    # LEFT's bbox X max = +10 (lap end on bottom half)
+    l_x_max = max((left.matrix_world @ v.co).x for v in left.data.vertices)
+    check(abs(l_x_max - 10.0) < 0.5, f"left bottom-lap ends at x=10 (got {l_x_max:.2f})")
+
+
+def test_sliding_dovetail_on_asymmetric_assembly():
+    """Picker now measures local thickness, so sliding-dovetail is sized to the
+    plate at the cut and the tenon doesn't extend LEFT into a phantom pillar.
+    """
+    print("\n[A2] Sliding dovetail on plate + boss (override)")
+    cleanup()
+    from quartermaster.blender.fixtures import create_test_block
+    # Plate 12mm thick (so SLIDING_DOVETAIL geometry actually fits) + tall boss
+    plate = create_test_block(name="QM_SDAsym",     size=(300.0, 200.0, 12.0), location=(0.0, 0.0, 0.0))
+    boss  = create_test_block(name="QM_SDAsymBoss", size=( 40.0,  40.0,  8.0), location=(80.0, 0.0, 10.0))
+    # boss z-center 10, height 8 -> z=6..14. Plate z=-6..6. Combined z=-6..14.
+
+    bpy.context.view_layer.objects.active = plate
+    bpy.ops.quartermaster.add_cut_plane()
+    empty = bpy.data.objects["QM_CutPlane"]
+    empty.rotation_mode = "XYZ"
+    empty.rotation_euler = (0.0, math.pi / 2, 0.0)
+    empty.location = (0.0, 0.0, 0.0)
+    bpy.context.view_layer.update()
+
+    bpy.context.scene.qm_joint_override = "SLIDING_DOVETAIL"
+    bpy.context.scene.qm_dovetail_angle = 12.0
+
+    bpy.ops.object.select_all(action="DESELECT")
+    boss.select_set(True)
+    plate.select_set(True)
+    bpy.context.view_layer.objects.active = plate
+    bpy.ops.quartermaster.execute_cut()
+
+    check("QM_SDAsym_L" in bpy.data.objects, "left half created")
+    left, right = bpy.data.objects["QM_SDAsym_L"], bpy.data.objects["QM_SDAsym_R"]
+
+    # Override doesn't set depth_mm so the generator default takes over:
+    # max(12*0.6, 8) = 8. The point of this test is the local-thickness
+    # *behaviour*, not the exact dim — without per-region thickness the bbox
+    # would have been ~20mm and produced a much larger tenon.
+    l_max = max((left.matrix_world @ v.co).x for v in left.data.vertices)
+    check(abs(l_max - 8.0) < 0.5, f"tenon tip at x=+8 (got {l_max:.2f})")
+
+    # LEFT's z extent stays within plate (z=-6..6) — no phantom material above
+    l_z_max = max((left.matrix_world @ v.co).z for v in left.data.vertices)
+    check(l_z_max <= 6.5, f"left stays within plate (z_max={l_z_max:.2f}, want ≤ 6.5)")
+
+    # RIGHT contains boss
+    r_z_max = max((right.matrix_world @ v.co).z for v in right.data.vertices)
+    check(r_z_max > 13, f"right contains boss (z_max={r_z_max:.2f})")
+
+
 def test_per_region_thickness_asymmetric_assembly():
     print("\n[A] Asymmetric assembly: thickness measured at cut, not bbox")
     cleanup()
@@ -757,6 +851,8 @@ def main():
         test_sliding_dovetail_via_picker,
         test_box_via_picker,
         test_per_region_thickness_asymmetric_assembly,
+        test_half_lap_on_asymmetric_assembly,
+        test_sliding_dovetail_on_asymmetric_assembly,
         test_preview_creates_wireframe,
         test_reset_scene_clears_qm_objects,
     ]
