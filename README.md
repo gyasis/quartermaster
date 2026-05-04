@@ -1,53 +1,101 @@
 # Quartermaster
 
-Auto-split prints that exceed your build plate, with the right joinery for the stock thickness.
+Auto-split prints that exceed your build plate, with the right joinery for the stock thickness — a Blender add-on.
+
+![Dovetail cut on a 300×200×4 mm test block — both halves shown, panel UI visible](docs/screenshots/hero-dovetail.png)
 
 ## What it does
 
-Take a model too big for your printer's build plate. Drop a cut-plane helper into the scene, drag it to the seam location, click **Cut Along Plane**. Quartermaster:
+Take a model too big for your printer's build plate. Drop a cut-plane Empty into the scene, drag it to the seam location, click **Cut Along Plane**. Quartermaster:
 
-1. Bakes the modifier stack of the target so the cut acts on what you see, not the raw mesh
-2. Measures the stock thickness and seam length at the cut location
-3. Picks the appropriate joint family from a 2-axis decision matrix
-4. Generates the joinery (cut surface + alignment pins or a tabled lock step)
-5. Splits the model into two halves with the joinery baked in
+1. **Bakes the modifier stack** of the target so the cut acts on what you see, not the raw mesh (a Solidify modifier turning a 4-vert quad into a 3 mm plate stays a plate)
+2. **Unions any other selected meshes** with the target — for assemblies built from multiple objects (plate + bosses, fixture + tabs, etc.)
+3. **Measures stock thickness at the cut intersection** by bisecting the part with the cut plane — *not* from the AABB. Asymmetric assemblies (plate with a tall boss far from the cut) get joints sized to the local plate, not to the boss extent
+4. **Picks the joint family** from a 2-axis decision matrix (thickness × seam length)
+5. **Generates the joinery** — cut surface, alignment pins (scarf), tabled lock step (scarf), trapezoidal tail (dovetail), rectangular fingers (finger / box), Z-step (half-lap), or sliding tenon (sliding dovetail)
+6. **Applies FDM clearance** (default 0.15 mm per side) so the printed pieces slot together with a real-world tolerance gap
+7. **Splits the model** into two halves with the joinery baked in. Both halves are clean closed solids you can export to STL
 
 ## Joint matrix
 
-|                          | Short seam (< 100 mm) | Medium (100-300 mm)            | Long (> 300 mm)         |
-|--------------------------|-----------------------|--------------------------------|-------------------------|
-| **< 3 mm thickness**     | scarf 12:1            | scarf 12:1 + pins              | scarf 12:1 + 3-4 pins   |
-| **3-5 mm**               | dovetail              | **scarf 8:1 + pins** _(default)_ | finger joint            |
-| **5-8 mm**               | dovetail              | finger / box                   | finger / box            |
-| **>= 8 mm**              | box                   | sliding dovetail               | sliding dovetail        |
+|                       | Short seam (< 100 mm) | Medium (100-300 mm)             | Long (> 300 mm)         |
+|-----------------------|-----------------------|---------------------------------|-------------------------|
+| **< 3 mm thickness**  | scarf 12:1            | scarf 12:1 + pins               | scarf 12:1 + pins       |
+| **3-5 mm**            | dovetail              | **scarf 8:1 + pins** _(default)_| finger                  |
+| **5-8 mm**            | dovetail              | finger                          | finger                  |
+| **>= 8 mm**           | box                   | sliding dovetail                | sliding dovetail        |
 
-Optional **tabled (locked) scarf**: adds a perpendicular step at mid-thickness — provides mechanical lock against in-plane pull and self-registers during glue-up.
+See [docs/joints.md](docs/joints.md) for one section per joint type with images, parameters, and when to use each.
+
+## Workflow inside Blender
+
+Look for the **Quartermaster** tab in the 3D viewport's N-panel (press `N` if hidden).
+
+1. **Add Test Block** (or pick your own mesh) — drops a clean 300×200×4 mm cuboid for trying things out
+2. **Add Cut Plane** — places a `QM_CutPlane` Empty with transform gizmos active. Optionally **Snap to Longest Axis** to align it perpendicular to the part's longest edge
+3. Drag the gizmo arrows or press G / R to position the cut where you want
+4. Pick a joint type (or leave on **Auto** to use the picker), tune **Print clearance** if needed
+5. Optional: **Preview Joint** to see the cut path as a wireframe overlay before committing
+6. Select the target mesh (ctrl-click any extras to union them in), click **Cut Along Plane**
+
+Re-running the cut cleanly replaces the prior `_L` / `_R` / `_baked` outputs — iterate as much as you want. **Reset Scene (clear QM)** at the bottom of the panel removes everything Quartermaster created, leaving your own meshes alone.
 
 ## Architecture
 
 ```
 src/quartermaster/
-├── joint_strategy.py    # picker brain — the 2-axis matrix above
-├── plane.py             # CutPlane abstraction (plane-agnostic; thickness derived from cut orientation)
+├── joint_strategy.py        # picker brain — the 2-axis matrix
+├── plane.py                 # CutPlane abstraction (plane-agnostic)
 ├── joints/
-│   └── scarf.py         # cut-path generation (smooth or tabled), pin distribution
+│   ├── scarf.py             # smooth and tabled scarf paths + alignment pins
+│   ├── dovetail.py          # trapezoidal tail path (single + multi-tail)
+│   ├── finger.py            # rectangular finger path (parameterized by pitch)
+│   ├── box.py               # rectangular finger path (parameterized by count)
+│   ├── half_lap.py          # Z-shape lap path
+│   ├── sliding_dovetail.py  # trapezoidal tenon profile
+│   └── preview.py           # unified wireframe preview generator
 └── blender/
-    ├── adapter.py       # Empty-as-cut-plane + evaluated-mesh handling
-    ├── cut.py           # pipeline: read empty -> measure -> pick -> cut
-    ├── operators.py     # Add Test Block, Add Cut Plane, Cut Along Plane
-    ├── panel.py         # N-panel UI ("Quartermaster" tab in 3D Viewport)
-    └── fixtures.py      # parametric test-block fixture
+    ├── adapter.py           # Empty-as-cut-plane + evaluated-mesh handling
+    ├── cut.py               # cut pipeline: bisect cross-section, dispatch on joint
+    ├── operators.py         # Add Test Block, Add Cut Plane, Snap, Preview, Cut, Reset
+    ├── panel.py             # N-panel UI
+    └── fixtures.py          # parametric test-block fixtures
 ```
 
-The `joint_strategy` and `joints/` modules are bpy-free — they import only stdlib and run in plain pytest. Only the `blender/` subpackage imports `bpy`.
+`joint_strategy`, `plane`, and everything under `joints/` are **bpy-free** — they import only stdlib and run in plain pytest. Only `blender/` imports `bpy`.
+
+## Status
+
+148 unit tests, 84 Blender smoke checks, all green on every push (CI runs both jobs):
+
+| Joint | Picker | Override | Tolerance | Asymmetric assemblies |
+|---|:-:|:-:|:-:|:-:|
+| Scarf (smooth + tabled) | ✓ | ✓ | n/a (bisect) | ✓ |
+| Dovetail (single + multi-tail) | ✓ | ✓ | ✓ | ✓ |
+| Finger | ✓ | ✓ | ✓ | ✓ |
+| Box | ✓ | ✓ | ✓ | ✓ |
+| Half-lap | _(override-only)_ | ✓ | _no_ | ✓ |
+| Sliding dovetail | ✓ | ✓ | ✓ | ✓ |
 
 ## Development
+
+Unit tests (no Blender required):
 
 ```sh
 uv run --with pytest pytest -v
 ```
 
-## Using inside Blender
+Headless Blender smoke test (after `blender --version` confirms Blender 4.x is on your `$PATH`):
+
+```sh
+blender --background --python scripts/blender_smoke.py
+```
+
+The smoke test exercises every operator end-to-end on real meshes and asserts on output geometry. CI runs the same script on every push (see [`.github/workflows/ci.yml`](.github/workflows/ci.yml)).
+
+## Installing as a local add-on
+
+For a one-session install (development mode), in Blender's Python console:
 
 ```python
 import sys
@@ -56,32 +104,4 @@ import quartermaster.blender
 quartermaster.blender.register()
 ```
 
-Look for the **Quartermaster** tab in the 3D viewport's N-panel (press `N` if hidden).
-
-Workflow:
-
-1. **Add Test Block** — drops a clean 300×200×4 mm cuboid (skip if you have your own model)
-2. **Add Cut Plane** — places `QM_CutPlane` Empty with transform gizmos active
-3. Drag the gizmo arrows or press G/R to position the cut
-4. Optional: enable **Locked (tabled) joint** for mechanical lock
-5. Select the target mesh, click **Cut Along Plane**
-
-Re-running step 5 cleanly removes prior `_L`/`_R`/`_baked` outputs and re-cuts. Idempotent.
-
-## Status
-
-v0.0.1. Implemented:
-
-- Picker (full 2-axis matrix, viable-set monotonicity, manual override, JSON serialization)
-- `CutPlane` abstraction (plane-agnostic — works for any cut orientation)
-- Scarf joint (smooth and tabled variants)
-- Blender add-on (operators + N-panel + transform gizmos)
-- 57 unit tests + Blender smoke test (`scripts/blender_smoke.py`)
-
-Next:
-
-- More joints: `joints/dovetail.py`, `joints/finger.py`, `joints/half_lap.py`
-- `table_mm` slider in panel for fine-tuning the lock step
-- "Snap cut plane to active object's long axis" button
-- Multi-object union before cutting (for assemblies with separate features)
-- Headless CI for Blender integration tests
+For a permanent install: zip `src/quartermaster/blender/` and load via _Edit > Preferences > Add-ons > Install_. Packaging as an `extensions.blender.org` extension is on the roadmap.
