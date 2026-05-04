@@ -7,7 +7,7 @@ on:
     branches: [main]
 
 jobs:
-  test:
+  unit-tests:
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -23,3 +23,36 @@ jobs:
 
       - name: Run pytest
         run: uv run --python ${{ matrix.python-version }} --with pytest pytest -v
+
+  blender-smoke:
+    # Runs the same scripts/blender_smoke.py we use locally, headlessly.
+    # Catches the integration bugs that pytest can't see (boolean modifier
+    # behavior, mesh/modifier ops, operator integration, evaluated-mesh
+    # handling, cutter winding, EXACT solver edge cases).
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Blender system deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libxi6 libxrender1 libxxf86vm1 libxfixes3 libxkbcommon0 \
+            libgl1 libegl1 libsm6
+
+      - name: Cache Blender
+        id: cache-blender
+        uses: actions/cache@v4
+        with:
+          path: ~/blender
+          key: blender-4.2.0-linux-x64
+
+      - name: Download Blender 4.2 LTS
+        if: steps.cache-blender.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p ~/blender
+          curl -fsSL https://download.blender.org/release/Blender4.2/blender-4.2.0-linux-x64.tar.xz \
+            | tar -xJ -C ~/blender --strip-components=1
+
+      - name: Run Blender smoke test (headless)
+        run: ~/blender/blender --background --python scripts/blender_smoke.py
